@@ -73,11 +73,8 @@ Join regional migration by night and assign weather and satellite data by the gr
 | --- | --- |
 | Building | `bin`, `roof_height_m`, `footprint_area_m2`, `land_use` |
 | Night and conditions | `night_date`, `decision_at_utc`, `season`, `observed_migration_birds_per_km_h`, `forecast_migration_birds_per_km_h`, `forecast_visibility_m`, `forecast_cloud_ceiling_m`, `forecast_wind_u_m_s`, `forecast_wind_v_m_s`, `moon_illum_fraction`, `moon_above_horizon_minutes` |
-<<<<<<< HEAD
 | Lighting | `observed_neighborhood_radiance`, `radiance_quality`; future inputs include `prior_neighborhood_radiance`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
-=======
 | Lighting | `prior_neighborhood_radiance`, `radiance_quality`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
->>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 | Survey outcome | `survey_completed`, `survey_coverage` (when available), `observed_collision_count` |
 
 1. **Build a retrospective baseline.** Use the Dryad dataset to train a regularized Poisson model for the number of collisions a survey finds. Start with season, migration traffic, and weather, and test whether building and light context improve the predictions. Use zero only for a completed survey that found zero birds. Keep unmonitored nights unlabeled, and account for survey effort when it is recorded. The surveyed buildings were selected for collision risk, so treat citywide scores as provisional.
