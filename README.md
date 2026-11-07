@@ -1,4 +1,4 @@
-# Weather-Triggered Light Pollution Interceptor
+# DarkSky
 
 <!-- Explain the problem and the decision the project will help building operators make. -->
 
