@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # Weather-Triggered Light Pollution Interceptor
+=======
+# DarkSky
+>>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 
 <!-- Explain the problem and the decision the project will help building operators make. -->
 
@@ -19,6 +23,7 @@ For the **hackathon demo**, replay a past migration night for a small group of M
 | Weather forecasts and archived runs | NOAA High-Resolution Rapid Refresh (HRRR) through the public S3 API. [Archive and access instructions](https://registry.opendata.aws/noaa-hrrr-pds/) | Extract hourly wind, visibility, cloud ceiling, cloud cover, and precipitation for NYC from `s3://noaa-hrrr-bdp-pds`. For a forecast replay, select a run available before the decision time and summarize its hourly values over the target night. |
 | Actual building lighting | Pilot operators' building-management system exports or API, paired with measurements of facade lighting | Log the normal schedule, allowed settings for each lighting zone, what actually ran, and a consistent measurement such as facade luminance or the fraction of windows illuminated. Use these logs to learn how a lighting change affects collision risk at a building. |
 
+<<<<<<< HEAD
 ## Run the Python data pipeline
 
 <!-- Start with the public baseline, then add sources to a short replay before doing a bulk pull. -->
@@ -57,19 +62,29 @@ To join the surveyed buildings to actual footprints, supply `--crosswalk configs
 
 Raw API responses and retrieval metadata are cached under `data/raw/`. To load the baseline in Python, use `pandas.read_csv("data/processed/baseline.csv", parse_dates=["night_date"])`. `observed_collision_count` is the target. Group train/test splits by night and building to account for shared inputs and repeated surveys. This dataset is for retrospective modeling. Same-night observed migration, weather, and satellite brightness become available after the pre-sunset decision, so a live alert model needs forecast-time replacements.
 
+=======
+>>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 ## Training data and model
 
 <!-- Define the label, the join keys, and what information will be available when an alert is issued. -->
 
 Use **one row per building per migration night**, keyed by `bin` and `night_date`. Set `night_date` to the local date when the night starts in `America/New_York`. Store timestamps in UTC and map a morning survey to the preceding night using the dataset's survey-date convention. Use the study supplement's building addresses to crosswalk survey IDs to BINs and verify matches before joining. Keep the study IDs for the baseline if a match is unclear. [Dataset field definitions](https://doi.org/10.5061/dryad.41ns1rnmw) · [Study and supplement](https://doi.org/10.1111/1365-2664.14590)
 
+<<<<<<< HEAD
 Join regional migration by night and sample gridded weather and satellite data at a verified footprint's representative point. Keep the source version and observation or forecast time with the data. Preserve missing values and quality flags so gaps remain visible in both training and the dashboard.
+=======
+Join regional migration by night and assign weather and satellite data by the grid cells that cover each building. Store the source version, observation or forecast time, and when each input was available. Preserve missing values and quality flags so gaps remain visible in both training and the dashboard.
+>>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 
 | Column group | Example fields |
 | --- | --- |
 | Building | `bin`, `roof_height_m`, `footprint_area_m2`, `land_use` |
 | Night and conditions | `night_date`, `decision_at_utc`, `season`, `observed_migration_birds_per_km_h`, `forecast_migration_birds_per_km_h`, `forecast_visibility_m`, `forecast_cloud_ceiling_m`, `forecast_wind_u_m_s`, `forecast_wind_v_m_s`, `moon_illum_fraction`, `moon_above_horizon_minutes` |
+<<<<<<< HEAD
 | Lighting | `observed_neighborhood_radiance`, `radiance_quality`; future inputs include `prior_neighborhood_radiance`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
+=======
+| Lighting | `prior_neighborhood_radiance`, `radiance_quality`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
+>>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 | Survey outcome | `survey_completed`, `survey_coverage` (when available), `observed_collision_count` |
 
 1. **Build a retrospective baseline.** Use the Dryad dataset to train a regularized Poisson model for the number of collisions a survey finds. Start with season, migration traffic, and weather, and test whether building and light context improve the predictions. Use zero only for a completed survey that found zero birds. Keep unmonitored nights unlabeled, and account for survey effort when it is recorded. The surveyed buildings were selected for collision risk, so treat citywide scores as provisional.
@@ -106,8 +121,12 @@ tests/                  # Check joins, overnight dates, missing data, and dimmin
 
 <!-- Use this checklist to track the demo and the work required for a pilot. -->
 
+<<<<<<< HEAD
 - [x] Download the Dryad dataset and export the supervised baseline and coverage report.
 - [ ] Verify survey-to-BIN matches and replay one historical night with all five sources joined.
+=======
+- [ ] Download the Dryad dataset and replay one historical night with a small set of NYC building footprints.
+>>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 - [ ] Add neighborhood radiance and Sun/Moon data, then render the ranked map and demo dimming schedule.
 - [ ] Train the baseline on survey outcomes and evaluate it on held-out seasons and buildings.
 - [ ] Backtest with forecasts available at alert time, then run a pilot with measured lighting and standardized collision surveys.
