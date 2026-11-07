@@ -19,19 +19,57 @@ For the **hackathon demo**, replay a past migration night for a small group of M
 | Weather forecasts and archived runs | NOAA High-Resolution Rapid Refresh (HRRR) through the public S3 API. [Archive and access instructions](https://registry.opendata.aws/noaa-hrrr-pds/) | Extract hourly wind, visibility, cloud ceiling, cloud cover, and precipitation for NYC from `s3://noaa-hrrr-bdp-pds`. For a forecast replay, select a run available before the decision time and summarize its hourly values over the target night. |
 | Actual building lighting | Pilot operators' building-management system exports or API, paired with measurements of facade lighting | Log the normal schedule, allowed settings for each lighting zone, what actually ran, and a consistent measurement such as facade luminance or the fraction of windows illuminated. Use these logs to learn how a lighting change affects collision risk at a building. |
 
+## Run the Python data pipeline
+
+<!-- Start with the public baseline, then add sources to a short replay before doing a bulk pull. -->
+
+From the project directory, use Python 3.11 or newer.
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m src.ingest coverage
+```
+
+`coverage` downloads the pinned Dryad release and checks NASA's public catalog. It writes `data/processed/baseline.csv` and `data/processed/baseline_coverage.json`. The baseline contains collision labels, regional migration, and observed weather from LaGuardia.
+
+**The finest shared training interval is one NYC night.** Dryad contains 5,422 usable building-night labels across 560 monitored nights from **March 31, 2017 through November 14, 2021**, with gaps between and within seasons. The longest consecutive interval is **August 31 through November 14, 2021 (76 nights)**. NASA lists a tile for all 76 nights and for 559 of the 560 monitored nights overall. The catalog confirms file availability. The pull checks whether a building actually has a usable pixel, since clouds and quality flags can reduce coverage. [Dryad dataset](https://doi.org/10.5061/dryad.41ns1rnmw) · [NASA Black Marble product](https://ladsweb.modaps.eosdis.nasa.gov/missions-and-measurements/products/VNP46A2/)
+
+For a one-night replay without a NASA account, run the following. `--weather hrrr` adds hourly HRRR archive pulls and reduces them to nightly features. The replay uses a decision time one hour before sunset and allows two hours for the forecast run to be published. Leave out this option for larger runs that only need the observed weather included in Dryad.
+
+```sh
+python -m src.ingest pull --start 2021-10-01 --end 2021-10-01 --skip-satellite --weather hrrr
+```
+
+To include artificial light, set `EARTHDATA_TOKEN` in your shell to an Earthdata download token with LAADS access and omit `--skip-satellite`. The token stays out of the cache and exports. Black Marble tiles are roughly 40 MB each. The pipeline caches them and retains the quality flags alongside the sampled radiance. [Earthdata Login](https://urs.earthdata.nasa.gov/) · [LAADS download instructions](https://ladsweb.modaps.eosdis.nasa.gov/learn/download-files-using-edl-tokens/)
+
+To join the surveyed buildings to actual footprints, supply `--crosswalk configs/study_building_bins.csv`. Create the CSV with the header `study_building_id,bin` and one verified study code and seven-digit BIN per row. The study's addresses are documented in its supplement. The default footprint query covers a small Lower Manhattan area and includes any verified BINs outside it. Use `--bounds WEST SOUTH EAST NORTH` to change the map extent. [Study and supplement](https://doi.org/10.1111/1365-2664.14590) · [NYC Building Footprints](https://data.cityofnewyork.us/City-Government/BUILDING/5zhs-2jue/about_data)
+
+`pull` writes the following files under `data/processed/`.
+
+| File | Contents |
+| --- | --- |
+| `training.csv` | All usable labels for the requested nights, with available features. Blank fields represent missing values. Unmatched sites keep their study ID and use a shared NYC reference point for satellite and forecast features. |
+| `training_complete.csv` | Rows with a matched footprint, valid natural and artificial light, and the requested weather coverage. |
+| `buildings.geojson` | NYC footprints and available land-use attributes for the requested area and any verified BINs. |
+| `coverage.json` | Row counts, missing footprint matches, and actual contiguous date windows at each stage of the join. |
+
+Raw API responses and retrieval metadata are cached under `data/raw/`. To load the baseline in Python, use `pandas.read_csv("data/processed/baseline.csv", parse_dates=["night_date"])`. `observed_collision_count` is the target. Group train/test splits by night and building to account for shared inputs and repeated surveys. This dataset is for retrospective modeling. Same-night observed migration, weather, and satellite brightness become available after the pre-sunset decision, so a live alert model needs forecast-time replacements.
+
 ## Training data and model
 
 <!-- Define the label, the join keys, and what information will be available when an alert is issued. -->
 
 Use **one row per building per migration night**, keyed by `bin` and `night_date`. Set `night_date` to the local date when the night starts in `America/New_York`. Store timestamps in UTC and map a morning survey to the preceding night using the dataset's survey-date convention. Use the study supplement's building addresses to crosswalk survey IDs to BINs and verify matches before joining. Keep the study IDs for the baseline if a match is unclear. [Dataset field definitions](https://doi.org/10.5061/dryad.41ns1rnmw) · [Study and supplement](https://doi.org/10.1111/1365-2664.14590)
 
-Join regional migration by night and assign weather and satellite data by the grid cells that cover each building. Store the source version, observation or forecast time, and when each input was available. Preserve missing values and quality flags so gaps remain visible in both training and the dashboard.
+Join regional migration by night and sample gridded weather and satellite data at a verified footprint's representative point. Keep the source version and observation or forecast time with the data. Preserve missing values and quality flags so gaps remain visible in both training and the dashboard.
 
 | Column group | Example fields |
 | --- | --- |
 | Building | `bin`, `roof_height_m`, `footprint_area_m2`, `land_use` |
 | Night and conditions | `night_date`, `decision_at_utc`, `season`, `observed_migration_birds_per_km_h`, `forecast_migration_birds_per_km_h`, `forecast_visibility_m`, `forecast_cloud_ceiling_m`, `forecast_wind_u_m_s`, `forecast_wind_v_m_s`, `moon_illum_fraction`, `moon_above_horizon_minutes` |
-| Lighting | `prior_neighborhood_radiance`, `radiance_quality`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
+| Lighting | `observed_neighborhood_radiance`, `radiance_quality`; future inputs include `prior_neighborhood_radiance`, `scheduled_light_output`, `actual_light_output`, `dimming_reduction_pct` |
 | Survey outcome | `survey_completed`, `survey_coverage` (when available), `observed_collision_count` |
 
 1. **Build a retrospective baseline.** Use the Dryad dataset to train a regularized Poisson model for the number of collisions a survey finds. Start with season, migration traffic, and weather, and test whether building and light context improve the predictions. Use zero only for a completed survey that found zero birds. Keep unmonitored nights unlabeled, and account for survey effort when it is recorded. The surveyed buildings were selected for collision risk, so treat citywide scores as provisional.
@@ -68,7 +106,8 @@ tests/                  # Check joins, overnight dates, missing data, and dimmin
 
 <!-- Use this checklist to track the demo and the work required for a pilot. -->
 
-- [ ] Download the Dryad dataset and replay one historical night with a small set of NYC building footprints.
+- [x] Download the Dryad dataset and export the supervised baseline and coverage report.
+- [ ] Verify survey-to-BIN matches and replay one historical night with all five sources joined.
 - [ ] Add neighborhood radiance and Sun/Moon data, then render the ranked map and demo dimming schedule.
 - [ ] Train the baseline on survey outcomes and evaluate it on held-out seasons and buildings.
 - [ ] Backtest with forecasts available at alert time, then run a pilot with measured lighting and standardized collision surveys.
