@@ -1,8 +1,6 @@
-<<<<<<< HEAD
 # Weather-Triggered Light Pollution Interceptor
-=======
+
 # DarkSky
->>>>>>> 63e8ad5ff14999857d5ec8429b3ab494c7b59551
 
 <!-- Explain the problem and the decision the project will help building operators make. -->
 
