@@ -1,0 +1,153 @@
+"""Local dashboard server: standard library only, serves index.html and a small JSON API.
+
+    GET  /                       the dashboard page
+    GET  /api/options            areas, weather sources, preset periods
+    POST /api/run                {start, end, area, weather, minutes} -> {job}
+    GET  /api/job?id=            {state, log, nights: [overview...], error}
+    GET  /api/night?id=&night=   buildings and radar cells GeoJSON, scan timeline, overview
+"""
+
+import json
+import threading
+import uuid
+import webbrowser
+from datetime import date, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import building_analysis
+import main as pipeline
+import migration_analysis
+
+PAGE = Path(__file__).with_name("index.html")
+PRESETS = [
+    {"label": "Sep 10, 2021: very heavy migration", "start": "2021-09-10", "end": "2021-09-10"},
+    {"label": "Oct 1, 2021: light migration", "start": "2021-10-01", "end": "2021-10-01"},
+    {"label": "Oct 10, 2021: rained out", "start": "2021-10-10", "end": "2021-10-10"},
+    {"label": "Oct 13-14, 2021: medium then heavy", "start": "2021-10-13", "end": "2021-10-14"},
+    {"label": "Sep 28-Oct 4, 2021: one week", "start": "2021-09-28", "end": "2021-10-04"},
+]
+_jobs = {}
+_run_lock = threading.Lock()  # One pipeline at a time; radar downloads share a cache.
+
+
+def _json(value):
+    return json.dumps(value, default=lambda v: v.isoformat() if isinstance(v, (date, datetime)) else str(v))
+
+
+def _run(job, params):
+    def log(message):
+        job["log"].append(message)
+
+    try:
+        with _run_lock:
+            for night in pipeline.nights(params["start"], params["end"]):
+                try:
+                    result = pipeline.run_night(night, params["area"], params["weather"], params["minutes"], log)
+                except Exception as error:
+                    log(f"{night}: failed ({error})")
+                    job["nights"].append({"night": night, "error": str(error)})
+                    continue
+                job["results"][night.isoformat()] = result
+                job["nights"].append(result["overview"])
+        job["state"] = "done"
+    except Exception as error:
+        job["state"], job["error"] = "error", str(error)
+
+
+def _night_payload(result):
+    rows = {row["bin"]: row for row in result["rows"]}
+    buildings = []
+    for d in result["decisions"]:
+        row = rows[d["bin"]]
+        buildings.append({"type": "Feature", "geometry": row["geometry"], "properties": {
+            "bin": d["bin"], "name": d["name"], "tier": d["tier"], "reduction_pct": d["reduction_pct"],
+            "action": d["action"], "score": d["score"], "reasons": d["reasons"],
+            "start_local": d["start_local"], "end_local": d["end_local"],
+            "height_m": row["roof_height_m"], "land_use": row["land_use_label"],
+            "year": row["construction_year"], "relative_density": row["neighborhood_relative_density"],
+        }})
+    cells = [{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [cell["polygon"]]},
+              "properties": {"mean_birds_per_km2": cell["mean_birds_per_km2"],
+                             "neighborhood": cell["neighborhood_relative_density"]}}
+             for cell in result["analysis"]["cells"].values()]
+    folder = migration_analysis.RADAR_DIR / result["night"].isoformat()
+    scans = []
+    if (folder / "scans.csv").is_file():
+        local = pipeline.lighting_judgement._local
+        scans = [{"time_local": local(s["scan_time_utc"]), "birds_per_km2": s["birds_per_km2"],
+                  "traffic": s["migration_traffic_birds_per_km_h"], "direction_deg": s["direction_deg"],
+                  "complete": s["profile_complete"]} for s in migration_analysis._scans(folder)]
+    return {"overview": result["overview"], "scans": scans,
+            "buildings": {"type": "FeatureCollection", "features": buildings},
+            "cells": {"type": "FeatureCollection", "features": cells}}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, status, body, kind="application/json"):
+        data = body.encode() if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _error(self, status, message):
+        self._send(status, _json({"error": message}))
+
+    def log_message(self, *args):  # Keep the terminal for pipeline progress.
+        pass
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        query = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if url.path == "/":
+            return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+        if url.path == "/api/options":
+            return self._send(200, _json({"areas": list(building_analysis.AREAS), "presets": PRESETS,
+                                          "weather": ["none", "dryad", "hrrr"], "max_nights": pipeline.MAX_NIGHTS}))
+        job = _jobs.get(query.get("id"))
+        if url.path == "/api/job":
+            if job is None:
+                return self._error(404, "Unknown job")
+            return self._send(200, _json({k: job[k] for k in ("state", "log", "nights", "error")}))
+        if url.path == "/api/night":
+            result = job and job["results"].get(query.get("night", ""))
+            if result is None:
+                return self._error(404, "That night has not finished processing")
+            return self._send(200, _json(_night_payload(result)))
+        self._error(404, "Not found")
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/run":
+            return self._error(404, "Not found")
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            start = date.fromisoformat(body["start"])
+            end = date.fromisoformat(body.get("end") or body["start"])
+            pipeline.validate(start, end)
+            area, weather, minutes = body.get("area", "midtown"), body.get("weather", "none"), int(body.get("minutes", 60))
+            if area not in building_analysis.AREAS or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60):
+                raise ValueError("Unsupported area, weather source, or scan interval")
+        except (KeyError, ValueError, json.JSONDecodeError) as error:
+            return self._error(400, str(error))
+        job_id = uuid.uuid4().hex[:12]
+        _jobs[job_id] = {"state": "running", "log": [], "nights": [], "results": {}, "error": None}
+        params = {"start": start, "end": end, "area": area, "weather": weather, "minutes": minutes}
+        threading.Thread(target=_run, args=(_jobs[job_id], params), daemon=True).start()
+        self._send(200, _json({"job": job_id}))
+
+
+def serve(port=8765, open_browser=True):
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+    print(f"DarkSky dashboard running at {url}  (Ctrl+C to stop)")
+    if open_browser:
+        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        server.server_close()

@@ -53,7 +53,9 @@ def buildings(cache, bounds, extra_bins):
         where += " OR bin in (" + ",".join(f"'{bin_id}'" for bin_id in sorted(extra_bins)) + ")"
 
     parts = defaultdict(list)
-    for row in _pages(cache, "5zhs-2jue", "bin,mappluto_bbl,height_roof,the_geom,objectid", where, "objectid"):
+    # Field definitions: github.com/CityOfNewYork/nyc-geo-metadata, Metadata_BuildingFootprints.md
+    columns = "bin,mappluto_bbl,height_roof,the_geom,objectid,name,feature_code,construction_year,ground_elevation"
+    for row in _pages(cache, "5zhs-2jue", columns, where, "objectid"):
         bin_id = row.get("bin", "")
         if re.fullmatch(r"[1-5]\d{6}", bin_id) and bin_id[1:] != "000000" and row.get("the_geom"):
             parts[bin_id].append(row)
@@ -74,6 +76,10 @@ def buildings(cache, bounds, extra_bins):
         heights = [float(row["height_roof"]) for row in rows if row.get("height_roof")]
         lots = {row["mappluto_bbl"] for row in rows if re.fullmatch(r"\d{10}", row.get("mappluto_bbl", ""))}
         bbl = next(iter(lots)) if len(lots) == 1 else None
+        codes = {int(row["feature_code"]) for row in rows if str(row.get("feature_code", "")).isdigit()}
+        years = [int(row["construction_year"]) for row in rows
+                 if str(row.get("construction_year", "")).isdigit() and int(row["construction_year"]) > 0]
+        grounds = [float(row["ground_elevation"]) for row in rows if row.get("ground_elevation")]
         result[bin_id] = {
             "type": "Feature",
             "geometry": mapping(geometry),
@@ -82,6 +88,11 @@ def buildings(cache, bounds, extra_bins):
                 "latitude": point.y, "longitude": point.x,
                 "roof_height_m": max(heights) * 0.3048 if heights else None,
                 "footprint_area_m2": GEOD.geometry_area_perimeter(orient_polygons(geometry))[0],
+                "name": next((row["name"].strip() for row in rows if row.get("name", "").strip()), None),
+                # 2100 = building; others are parking, tanks, placeholders, skybridges, etc.
+                "feature_code": 2100 if 2100 in codes else min(codes) if codes else None,
+                "construction_year": min(years) if years else None,
+                "ground_elevation_m": min(grounds) * 0.3048 if grounds else None,
             },
         }
     return result

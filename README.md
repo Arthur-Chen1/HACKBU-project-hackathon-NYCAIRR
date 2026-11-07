@@ -18,6 +18,7 @@ For the **hackathon demo**, replay a past migration night for a small group of M
 | Artificial light | NASA Earthdata Common Metadata Repository (CMR) Search API. [API docs](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html) · [VIIRS Black Marble product](https://ladsweb.modaps.eosdis.nasa.gov/missions-and-measurements/products/VNP46A2/) | Search `https://cmr.earthdata.nasa.gov/search/granules.json` for `short_name=VNP46A2`, Collection 2, NYC bounds, and a date range. Use Earthdata Login to download the files and keep quality flags alongside the radiance. Use valid prior observations to estimate neighborhood brightness at roughly 500 m resolution. Several buildings can share one pixel. |
 | Natural light | U.S. Naval Observatory Sun and Moon API. [API docs](https://aa.usno.navy.mil/data/api) | Query `https://aa.usno.navy.mil/api/rstt/oneday` for NYC on both dates spanning the night. Use sunset, sunrise, civil twilight, moonrise, moonset, and the illuminated fraction of the Moon. Moon phase and time above the horizon are proxies for available moonlight. Use cloud cover as a separate weather input. |
 | Bird migration and collision labels | Dryad REST API. [API docs](https://github.com/datadryad/dryad-app/blob/main/documentation/apis/README.md) · [NYC dataset](https://doi.org/10.5061/dryad.41ns1rnmw) | Under `https://datadryad.org/api/v2`, look up `/datasets/doi%3A10.5061%2Fdryad.41ns1rnmw` and pin the downloaded dataset version. Use `amt`, a nightly regional migration traffic estimate from the KOKX radar, and `count`, the number of birds found per building survey. The dataset includes spring and fall surveys from 2017–2021. For a live demo, enter a regional migration forecast manually and log its issue time. [BirdCast forecast information](https://birdcast.org/science-center/for-meteorologists/) |
+| Bird migration patterns |  Nexrad (https://registry.opendata.aws/noaa-nexrad/) | Grab bird migration data to be used in migration_analysis.py |
 | Weather forecasts and archived runs | NOAA High-Resolution Rapid Refresh (HRRR) through the public S3 API. [Archive and access instructions](https://registry.opendata.aws/noaa-hrrr-pds/) | Extract hourly wind, visibility, cloud ceiling, cloud cover, and precipitation for NYC from `s3://noaa-hrrr-bdp-pds`. For a forecast replay, select a run available before the decision time and summarize its hourly values over the target night. |
 | Actual building lighting | Pilot operators' building-management system exports or API, paired with measurements of facade lighting | Log the normal schedule, allowed settings for each lighting zone, what actually ran, and a consistent measurement such as facade luminance or the fraction of windows illuminated. Use these logs to learn how a lighting change affects collision risk at a building. |
 
@@ -58,6 +59,36 @@ To join the surveyed buildings to actual footprints, supply `--crosswalk configs
 | `coverage.json` | Row counts, missing footprint matches, and actual contiguous date windows at each stage of the join. |
 
 Raw API responses and retrieval metadata are cached under `data/raw/`. To load the baseline in Python, use `pandas.read_csv("data/processed/baseline.csv", parse_dates=["night_date"])`. `observed_collision_count` is the target. Group train/test splits by night and building to account for shared inputs and repeated surveys. This dataset is for retrospective modeling. Same-night observed migration, weather, and satellite brightness become available after the pre-sunset decision, so a live alert model needs forecast-time replacements.
+
+## Map migrating birds with NEXRAD radar
+
+<!-- Finer than a regional nightly number: ~1 km cells over NYC, every scan, with altitude and direction. -->
+
+`radar` reads NOAA NEXRAD Level II volume scans for the KOKX radar (Upton, NY) from the public `unidata-nexrad-level2` S3 bucket. It needs no account. For each night, from sunset to sunrise, it estimates how many birds are aloft, how high they fly, which way they head, and how the density varies across NYC.
+
+```sh
+python -m src.ingest radar --start 2021-09-10 --minutes 30 --compare-dryad
+```
+
+The method is a simplified version of the published vol2bird/bioRad approach. [vol2bird](https://doi.org/10.1098/rsif.2010.0116) · [bioRad](https://doi.org/10.1111/ecog.04028) · [range correction](https://doi.org/10.1111/2041-210X.13466)
+
+1. **Separate birds from rain.** Gates with a correlation coefficient below 0.95 count as biological echoes. Gates without an echo count as zero birds.
+2. **Build a vertical profile.** Gates 5–35 km from the radar give bird density in 200 m layers up to 3 km. A VAD fit to the radial velocities gives flight speed and direction. Layers whose velocity spread is below 2 m/s are treated as insects or rain.
+3. **Correct for distance across NYC.** Over Manhattan, the lowest beam is about 1–1.6 km up. For each cell of about 1 km, the observed reflectivity is compared with what the beam would see under the profile. That ratio scales the profile's birds/km² to the cell.
+
+The command writes these files under `data/processed/radar/<night>/`.
+
+| File | Contents |
+| --- | --- |
+| `scans.csv` | Per scan: birds/km², migration traffic (birds/km/h), flight speed and direction, mean height, and the share of birds below 600 m |
+| `profiles.csv` | Per scan and 200 m layer: birds/km³, flight vector, velocity spread, rain fraction |
+| `cells.csv` | Per scan and grid cell: birds/km², traffic, range-correction factor, beam height, rain fraction |
+| `cells.geojson` | Nightly mean and peak birds/km² per cell, as polygons for mapping or building joins |
+| `summary.json` | Nightly mean and peak, total traffic, traffic-weighted direction, and the Dryad estimate when requested |
+
+**Validation.** Nine fall 2021 nights were processed with hourly scans and compared with the Dryad study's independent nightly KOKX migration estimate. Spearman ρ = 0.93 across the 8 nights with radar values. Oct 10 was rained out. Busy nights matched within about 25% (Sep 10: 6,005 vs 4,945 birds/km/h; Oct 14: 3,453 vs 3,189). The radar directions were the expected fall SSW (208–220°). Rainy nights had few complete profiles and are reported as missing, not zero.
+
+**Limits.** One radar about 95 km away cannot see birds below roughly 600 m over Manhattan. The low-altitude share comes from the profile near the radar and is assumed to hold over NYC. Cells resolve neighborhoods, not individual buildings, so building-level risk still depends on building height, glass, and lighting. Insects on warm nights and residual ground clutter can inflate estimates. KDIX (Fort Dix, NJ) is a second radar that can cross-check KOKX with `--site KDIX`. The archive supports replay and same-night nowcasts. A pre-sunset alert still needs a migration forecast, such as BirdCast.
 
 ## Training data and model
 
