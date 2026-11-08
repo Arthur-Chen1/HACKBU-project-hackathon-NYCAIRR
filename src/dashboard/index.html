@@ -9,8 +9,9 @@
 <style>
   :root {
     --bg: #f5f6f8; --panel: #fff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb;
-    --accent: #2b59c3; --error: #c0392b; --notice: #e67e22;
+    --accent: #2b59c3; --error: #c0392b;
     --high: #c0392b; --medium: #e67e22; --low: #2e8b57; --unknown: #7f8c8d;
+    --dimming-high: #bf3434; --dimming-medium: #eaa74c; --dimming-low: #cbd5df; --dimming-unavailable: #edf0f3;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
@@ -44,7 +45,8 @@
   .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
   .stat > span { font-size: 12px; color: var(--muted); }
   .basemap { filter: grayscale(1) contrast(.85) brightness(1.08); }
-  #note { margin-top: 8px; font-size: 13px; color: var(--notice); }
+  #note { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  #note:empty { display: none; }
   #map { height: 520px; border-radius: 10px; border: 1px solid var(--line); }
   .bottom { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; }
@@ -59,7 +61,7 @@
 <body>
 <header>
   <h1>DarkSky Migrations</h1>
-  <span>Building-night collision estimates and priorities</span>
+  <span>Collision forecasts and suggested dimming</span>
 </header>
 <div class="layout">
   <div class="side">
@@ -113,7 +115,7 @@
     <div class="card">
       <h2>Nights in period</h2>
       <table>
-        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">High</th><th class="num">Medium</th></tr></thead>
+        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">Top 5%</th><th class="num">Avg. dim</th></tr></thead>
         <tbody id="nights"></tbody>
       </table>
       <div class="hint">Click a night to map it.</div>
@@ -128,13 +130,13 @@
     <div>
       <div id="map"></div>
       <div class="legend">
-        <b>Building priority</b>
+        <b>Suggested dimming</b>
         <span id="buildingLegend" style="display:contents"></span>
         <span><i class="swatch" style="background:#3b6fd8;opacity:.5"></i>Radar: birds relative to NYC tonight (darker = more)</span>
         <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">
           <input type="checkbox" id="showCells" checked style="width:auto"> Radar layer</label>
       </div>
-      <div class="hint">Priority is relative to scored buildings in this area and night: high ≈ top 20%, medium ≈ next 30%, low ≈ remaining 50%. Equal estimates share a priority; zero estimates are low. High priority can occur on a quiet night and does not mean a high absolute collision count.</div>
+      <div class="hint">Darker color means a larger suggested cut: red ≈ top 5%, amber ≈ next 20%, pale ≈ remaining 75%. Ties stay together and may leave fewer red buildings. Percentages are a collision-driven planning guide for nonessential lighting, not a validated lighting target.</div>
     </div>
     <div class="bottom">
       <div class="card"><h2>Migration through the night</h2><div id="timeline" class="empty">Run a period to see the radar timeline.</div></div>
@@ -145,15 +147,16 @@
 <script>
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const priorityColor = p => css('--' + (p === 'unavailable' ? 'unknown' : p));
-const PRIORITY_LEGEND = [['high', 'High priority'], ['medium', 'Medium priority'], ['low', 'Low priority']];
-const buildingColor = p => priorityColor(p.risk_priority);
+const dimmingColor = band => css('--dimming-' + (band || 'unavailable'));
+const DIMMING_LEGEND = [['high', 'Largest cuts · top 5%'], ['medium', 'Next 20%'], ['low', 'Remaining 75%']];
+const buildingColor = p => dimmingColor(p.dimming_band);
 function renderLegend() {
   const swatch = (color, label) => `<span><i class="swatch" style="background:${color}"></i>${label}</span>`;
-  $('buildingLegend').innerHTML = [...PRIORITY_LEGEND.map(([key, label]) => swatch(css('--' + key), label)),
-    swatch(css('--unknown'), 'Unavailable')].join('');
+  $('buildingLegend').innerHTML = [...DIMMING_LEGEND.map(([key, label]) => swatch(dimmingColor(key), label)),
+    swatch(dimmingColor('unavailable'), 'Unavailable')].join('');
 }
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
+const dimPct = x => x == null ? '–' : (x > 0 && x < 0.1 ? '<0.1%' : `${fmt(x, 1)}%`);
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -282,8 +285,8 @@ async function init() {
     if (forecast && !$('migrationIssued').value) $('migrationIssued').value = options.now_local;
     $('modeHint').textContent = forecast
       ? (options.forecast_model_available
-        ? 'The forecast model scores each building from weather, migration, the date, roof height, and facade length. Loading progress appears below.'
-        : 'Forecast model is not installed. Estimates and priority are unavailable until the forecast setup in README.md is complete.')
+        ? 'Suggested dimming uses the collision forecast for each building. Loading progress appears below.'
+        : 'Forecast model is not installed. Collision and dimming estimates are unavailable until the forecast setup in README.md is complete.')
       : 'A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.';
   }
   $('mode').onchange = () => {
@@ -331,8 +334,8 @@ function renderTable(nights) {
     ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--error)">${esc(n.error)}</td></tr>`
     : `<tr data-night="${n.night}" class="${n.night === selected ? 'selected' : ''}">
         <td>${n.night}</td><td><span class="badge" style="background:${css('--' + n.level)}">${n.level}</span></td>
-        <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.priorities.high || 0)}</td>
-        <td class="num">${fmt(n.priorities.medium || 0)}</td></tr>`).join('');
+        <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.dimming_bands.high || 0)}</td>
+        <td class="num">${dimPct(n.mean_suggested_dimming_pct)}</td></tr>`).join('');
   for (const tr of $('nights').querySelectorAll('tr[data-night]')) tr.onclick = () => selectNight(tr.dataset.night);
 }
 
@@ -351,13 +354,12 @@ function renderSummary(o) {
     stat(`<span class="badge" style="background:${css('--' + o.level)};font-size:13px">${o.level}</span>`, 'migration level'),
     stat(fmt(o.traffic_birds_per_km_h), 'birds / km / h (mean)'),
     stat(`${fmt(o.scored_buildings)} / ${fmt(o.buildings)}`, 'building-nights with expected counts'),
-    stat(`${fmt(o.priorities.high || 0)} / ${fmt(o.priorities.medium || 0)} / ${fmt(o.priorities.low || 0)}`, 'high / medium / low priority'),
-    stat(fmt(o.max_expected_collision_count, 2), 'highest expected collisions'),
-    stat(fmt(o.priorities.unavailable || 0), 'priority unavailable'),
+    stat(dimPct(o.mean_suggested_dimming_pct), 'average suggested dimming'),
+    stat(dimPct(o.max_suggested_dimming_pct), 'largest suggested cut'),
+    stat(fmt(o.dimming_bands.high || 0), 'buildings with the largest cuts · top 5%'),
   ].join('');
-  const context = o.mode === 'observed' ? `${o.scans_used} of ${o.scans_processed} radar scans usable`
-    : (o.decision_at_utc ? `Forecast cutoff ${o.decision_at_utc}` : 'Forecast cutoff unavailable');
-  $('note').textContent = [o.note, o.model, o.weather, context].filter(Boolean).join(' · ');
+  // Keep genuine missing-data messages; omit the former model/coverage explanation banner.
+  $('note').textContent = o.note || '';
 }
 
 function renderMap(data, refit = true) {
@@ -385,10 +387,15 @@ function renderDetail(p) {
   $('detail').innerHTML = `
     <div><b>${esc(p.name || 'BIN ' + p.bin)}</b> ${p.name ? `<span class="empty">BIN ${p.bin}</span>` : ''}</div>
     <div class="empty">${esc(p.land_use || 'Unknown use')} · ${fmt(p.height_m)} m${p.year ? ' · built ' + p.year : ''}</div>
-    <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)} priority</span>
-      <b style="margin-left:6px">${fmt(p.expected_collision_count, 3)} expected collisions</b> · ${esc(p.risk_basis)}</p>
-    ${p.priority_rank ? `<div>Rank ${fmt(p.priority_rank)} of ${fmt(p.priority_scored_buildings)} scored buildings in this area tonight</div>` : ''}
-    <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;
+    <p style="margin:10px 0 4px"><b style="font-size:22px">${p.suggested_dimming_pct == null ? 'Dimming estimate unavailable' : `Dim by ${dimPct(p.suggested_dimming_pct)}`}</b></p>
+    <div class="empty">Suggested reduction in nonessential light output · planning estimate</div>
+    <div style="margin-top:6px">${fmt(p.expected_collision_count, 3)} predicted collisions per building-night</div>
+    ${p.dimming_rank ? `<div>Rank ${fmt(p.dimming_rank)} of ${fmt(p.dimming_scored_buildings)} dimming estimates in this area tonight</div>` : ''}
+    <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    <details style="margin-top:10px"><summary>About this estimate</summary>
+      <p class="empty">${esc(p.dimming_basis)}. The percentage follows the collision estimate; it does not predict collisions prevented or use a measured ideal light level. Required and emergency lighting are excluded.</p>
+      <div class="empty">Collision model: ${esc(p.risk_basis)}</div>
+    </details>`;
 }
 
 function renderTimeline(scans) {

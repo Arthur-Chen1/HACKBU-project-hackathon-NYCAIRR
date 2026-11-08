@@ -105,9 +105,11 @@ def overview(analysis, decisions, weather, *, forecast=False, model=None):
     n = analysis["night"]
     counts = Counter(d["tier"] for d in decisions)
     priorities = Counter(d["risk_priority"] for d in decisions)
+    dimming = [d["suggested_dimming_pct"] for d in decisions if d.get("suggested_dimming_pct") is not None]
+    dimming_bands = Counter(d.get("dimming_band", "unavailable") for d in decisions)
     scored = sum(d["expected_collision_count"] is not None for d in decisions)
     if forecast and not model:
-        note = ("No forecast AI model: estimates and priority are unavailable. Train it with "
+        note = ("No forecast AI model: collision and dimming estimates are unavailable. Train it with "
                 "python -m src.models train --mode forecast to get expected counts.")
     elif forecast:
         note = "" if scored else "Expected counts unavailable. See each building’s reasons and input coverage."
@@ -141,6 +143,10 @@ def overview(analysis, decisions, weather, *, forecast=False, model=None):
         "max_expected_collision_count": max((d["expected_collision_count"] for d in decisions
                                              if d["expected_collision_count"] is not None), default=None),
         "priorities": dict(priorities),
+        "dimming_bands": dict(dimming_bands),
+        "dimming_estimates": len(dimming),
+        "mean_suggested_dimming_pct": sum(dimming) / len(dimming) if dimming else None,
+        "max_suggested_dimming_pct": max(dimming, default=None),
         "tiers": {tier: counts[tier] for tier in ("off", "dim", "reduce", "none", "review", "not_in_program")},
         "note": note,
     }
@@ -151,7 +157,7 @@ def run_night(night, area=building_analysis.DEFAULT_AREA, weather="dryad", minut
     started = perf_counter()
     model_text = building_analysis.forecast_model_summary(model_path) if forecast else None
     if forecast and not model_text:
-        log("Forecast model missing: collision estimates and priority are unavailable. "
+        log("Forecast model missing: collision and dimming estimates are unavailable. "
             "See README.md forecast setup.")
     spec, buildings = area_buildings(area, log, night)
     buildings_ready = perf_counter()

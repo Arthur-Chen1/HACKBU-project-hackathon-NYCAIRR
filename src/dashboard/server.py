@@ -97,8 +97,10 @@ def _night_payload(result):
         buildings.append({"type": "Feature", "geometry": row["geometry"], "properties": {
             **{key: d.get(key) for key in ("bin", "bbl", "name", "night_date", "expected_collision_count",
                                           "risk_priority", "risk_basis", "risk_features", "decision_at_utc",
-                                          "priority_rank", "priority_scored_buildings", "priority_basis")},
-            # The website presents model explanations, without the CLI's lighting-budget reasons.
+                                          "priority_rank", "priority_scored_buildings", "priority_basis",
+                                          "suggested_dimming_pct", "dimming_band", "dimming_rank",
+                                          "dimming_scored_buildings", "dimming_basis", "dimming_policy_version")},
+            # Keep planning estimates distinct from the CLI's operator-approved light-budget actions.
             "reasons": row["risk_reasons"],
             "height_m": row["roof_height_m"], "land_use": row["land_use_label"],
             "year": row["construction_year"], "relative_density": row.get("neighborhood_relative_density"),

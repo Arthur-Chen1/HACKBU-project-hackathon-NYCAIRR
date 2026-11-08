@@ -80,7 +80,7 @@ from src.ingest import dryad, hrrr, nyc, usno
 from src.ingest.http import Cache
 from src.models.count import DEFAULT_OBSERVED_MODEL, load_model
 from src.models.forecast_ai import DEFAULT_FORECAST_MODEL, load_forecast_model
-from src.recommendations.priority import assign_priorities
+from src.recommendations.dimming_estimate import estimate_dimming
 
 OUTPUT_DIR = Path("data/processed/buildings")
 RAW_DIR = Path("data/raw")
@@ -219,7 +219,7 @@ def score_buildings(rows, model, *, mode):
         basis = getattr(model, "basis", f"{mode} Poisson model")
         if model is None:
             basis = f"{mode} model unavailable"
-            reasons = (f"Expected counts and priority require a trained {mode} model; see README.md setup",)
+            reasons = (f"Collision and dimming estimates require a trained {mode} model; see README.md setup",)
         else:
             if batch is not None:
                 result = batch[index]
@@ -238,7 +238,7 @@ def score_buildings(rows, model, *, mode):
         scored.append({**row, "expected_collision_count": expected,
                        "risk_basis": basis, "risk_features": features,
                        "risk_reasons": (*row.get("source_issues", ()), *reasons)})
-    return assign_priorities(scored)
+    return estimate_dimming(scored)
 
 
 def analyze_forecast(buildings, night, inputs, *, model_path=None, cache=RAW_DIR, now=None, log=None):

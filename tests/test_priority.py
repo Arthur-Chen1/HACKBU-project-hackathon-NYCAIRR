@@ -20,7 +20,7 @@ class PriorityTests(TestCase):
     def test_distribution_uses_model_order_without_changing_estimates(self):
         original = rows([n / 1000 for n in range(10, 0, -1)])
         ranked = assign_priorities(original)
-        self.assertEqual([r["risk_priority"] for r in ranked], ["high"] * 2 + ["medium"] * 3 + ["low"] * 5)
+        self.assertEqual([r["risk_priority"] for r in ranked], ["high"] + ["medium"] * 2 + ["low"] * 7)
         self.assertEqual([r["expected_collision_count"] for r in ranked],
                          [r["expected_collision_count"] for r in original])
         self.assertNotIn("priority_rank", original[0])
@@ -31,7 +31,15 @@ class PriorityTests(TestCase):
         self.assertEqual({r["bin"]: r["risk_priority"] for r in forward},
                          {r["bin"]: r["risk_priority"] for r in backward})
         self.assertEqual([r["priority_rank"] for r in forward], [1, 1, 1, 4, 4, 4, 7, 7, 7, 7])
-        self.assertEqual([r["risk_priority"] for r in forward], ["high"] * 3 + ["medium"] * 3 + ["low"] * 4)
+        self.assertEqual([r["risk_priority"] for r in forward], ["medium"] * 3 + ["low"] * 7)
+
+    def test_top_five_percent_is_sparse_even_when_estimates_tie(self):
+        ranked = assign_priorities(rows(range(100, 0, -1)))
+        self.assertEqual([r["risk_priority"] for r in ranked], ["high"] * 5 + ["medium"] * 20 + ["low"] * 75)
+        tied = assign_priorities(rows([1] * 20 + [.1] * 80))
+        self.assertEqual([r["risk_priority"] for r in tied], ["medium"] * 20 + ["low"] * 80)
+        uniform = assign_priorities(rows([.1] * 100))
+        self.assertTrue(all(r["risk_priority"] == "low" for r in uniform))
 
     def test_zero_small_groups_and_invalid_values(self):
         ranked = assign_priorities(rows([None, float("nan"), float("inf"), -1, 0, 0, .001]))
@@ -58,9 +66,14 @@ class PriorityTests(TestCase):
               patch.object(building_analysis, "analyze_forecast", return_value=scored)):
             result = main.run_night(NIGHT, "pilot", forecast=True, log=lambda _: None)
         payload = _night_payload(result)
-        self.assertEqual(payload["overview"]["priorities"], {"high": 2, "medium": 3, "low": 5})
+        self.assertEqual(payload["overview"]["priorities"], {"high": 1, "medium": 2, "low": 7})
+        self.assertEqual(payload["overview"]["dimming_bands"], {"high": 1, "medium": 2, "low": 7})
+        self.assertEqual(payload["overview"]["dimming_estimates"], 10)
         properties = [f["properties"] for f in payload["buildings"]["features"]]
         self.assertEqual([p["risk_priority"] for p in properties], [r["risk_priority"] for r in scored])
         self.assertEqual([p["priority_rank"] for p in properties], list(range(1, 11)))
+        self.assertEqual([p["suggested_dimming_pct"] for p in properties],
+                         [r["suggested_dimming_pct"] for r in scored])
+        self.assertEqual(payload["overview"]["max_suggested_dimming_pct"], properties[0]["suggested_dimming_pct"])
         self.assertTrue(all("action" not in p and "reduction_pct" not in p for p in properties))
         self.assertTrue(all(p["reasons"] == () for p in properties))
