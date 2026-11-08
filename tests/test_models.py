@@ -31,6 +31,8 @@ def training_rows():
                 "feature_location": "matched_footprint",
                 "roof_height_m": 30 * (building + 1),
                 "footprint_area_m2": 100 * (building + 1),
+                "construction_year": 1950 + 10 * building,
+                "surveyed_facade_m": 150 + 50 * building,
                 "observed_neighborhood_radiance": 10 * building,
                 "radiance_quality": 0,
                 "prior_neighborhood_radiance": 10 * building,

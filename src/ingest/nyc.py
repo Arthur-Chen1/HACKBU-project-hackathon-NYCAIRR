@@ -31,8 +31,10 @@ def crosswalk(path):
             bin_id = row["bin"].strip()
             if not site or not re.fullmatch(r"[1-5]\d{6}", bin_id):
                 raise ValueError("Crosswalk entries need a study_building_id and a seven-digit NYC BIN")
-            if site in result or bin_id in result.values():
-                raise ValueError("Crosswalk must map each study site to a unique BIN")
+            # Two sites may share a BIN: the study surveyed different facades of one building in
+            # different seasons (1 Hotel Brooklyn Bridge Park is both "l" and "r").
+            if site in result:
+                raise ValueError(f"Crosswalk lists study site {site!r} more than once")
             result[site] = bin_id
     return result
 
@@ -124,6 +126,7 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
         years = [int(row["construction_year"]) for row in rows
                  if str(row.get("construction_year", "")).isdigit() and int(row["construction_year"]) > 0]
         grounds = [float(row["ground_elevation"]) for row in rows if row.get("ground_elevation")]
+        area, perimeter = GEOD.geometry_area_perimeter(orient_polygons(geometry))
         result[bin_id] = {
             "type": "Feature",
             "geometry": mapping(geometry),
@@ -131,7 +134,9 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
                 "bin": bin_id, "bbl": bbl, "land_use": land_use.get(bbl),
                 "latitude": point.y, "longitude": point.x,
                 "roof_height_m": max(heights) * 0.3048 if heights else None,
-                "footprint_area_m2": GEOD.geometry_area_perimeter(orient_polygons(geometry))[0],
+                "footprint_area_m2": area,
+                # Facade length at street level; the collision model uses it as exposure.
+                "footprint_perimeter_m": perimeter,
                 "name": next((row["name"].strip() for row in rows if row.get("name", "").strip()), None),
                 # 2100 = building; others are parking, tanks, placeholders, skybridges, etc.
                 "feature_code": 2100 if 2100 in codes else min(codes) if codes else None,

@@ -28,6 +28,7 @@ load_buildings(bounds=PILOT_BOUNDS, cache=Path("data/raw")) -> list[dict]
       "roof_height_m": float | None,
       "height_class": "low" | "mid" | "tall" | "unknown",   # see HEIGHT_CLASSES
       "footprint_area_m2": float,
+      "footprint_perimeter_m": float,  # street-level facade length; collision model exposure
       "latitude": float, "longitude": float,  # point guaranteed inside the footprint
       "geometry": GeoJSON geometry dict,
     }
@@ -141,6 +142,7 @@ def load_buildings(bounds=nyc.PILOT_BOUNDS, cache=Path("data/raw"), *, land_uses
             "in_program": code in LIGHTING_PROGRAM_LAND_USES and p.get("feature_code") == BUILDING_FEATURE_CODE,
             "roof_height_m": p["roof_height_m"], "height_class": height_class(p["roof_height_m"]),
             "footprint_area_m2": p["footprint_area_m2"],
+            "footprint_perimeter_m": p.get("footprint_perimeter_m"),
             "latitude": p["latitude"], "longitude": p["longitude"],
             "feature_location": "matched_footprint",
             "feature_latitude": p["latitude"], "feature_longitude": p["longitude"],

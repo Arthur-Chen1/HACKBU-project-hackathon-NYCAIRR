@@ -2,11 +2,30 @@
 
 ## What was trained
 
-The saved **historical observed model** is [observed.json](data/processed/models/observed.json). It contains two fitted Poisson regressions. The base fit uses 5,422 survey rows from 27 study sites over 560 monitored NYC nights from March 31, 2017, through November 14, 2021. The natural-light fit uses the 1,190 of those rows with usable Sun and Moon features, covering 20 sites and 76 nights in fall 2021.
+The saved **historical observed model** is [observed.json](data/processed/models/observed.json). It contains four fitted Poisson regressions (profiles):
 
-I reran training in a temporary directory with the current code. Both CSV checksums matched the saved artifact, and retraining reproduced its coefficients and evaluation report exactly. The artifact is local because Git ignores `data/processed/`.
+| Profile | Rows | Sites | What it adds |
+| --- | ---: | ---: | --- |
+| `base` | 5,422 | 27 | Season, migration, and LaGuardia weather. Covers 560 monitored nights from March 31, 2017, through November 14, 2021. |
+| `natural_light` | 1,190 | 20 | Night length and potential moonlit hours, fall 2021 only (76 nights). |
+| `footprint` | 5,202 | 21 | Log roof height and log footprint area of the matched building, with facade length as exposure. This is the per-building fit. |
+| `natural_light+footprint` | 1,030 | 17 | Both enrichments, fall 2021 only. |
 
-The saved training data has zero rows with verified study-to-BIN footprint joins or usable satellite radiance, so neither fit has building geometry or artificial-light coefficients. **There is no trained pre-sunset forecast artifact in this workspace.** The forecast training and scoring code is implemented. With suitable daily inputs, it can currently produce a demo priority while the numeric forecast remains blank.
+The artifact is local because Git ignores `data/processed/`. Each teammate rebuilds it with the commands in [Reproduce or run it](#reproduce-or-run-it). The artifact uses feature version 3. The scorer rejects older files, so retrain after pulling this change.
+
+Rebuilding from the commands below reproduces the original base and natural-light coefficients and evaluation exactly, because the Dryad CSV is checksum-pinned.
+
+**Building-level fit.** The Dryad data identifies buildings only by letter codes. [configs/study_building_bins.csv](configs/study_building_bins.csv) maps 21 of the 27 study sites to NYC BINs. The addresses come from Table S2 of the study supplement. Each was geocoded with NYC GeoSearch and checked against the footprint's height and name. [configs/README.md](configs/README.md) lists the six excluded sites and the reasons. The study sites differ a lot: site `y` averages 3.16 collisions per surveyed night, site `a` averages 0.05, and the top five sites account for 42% of all collisions. With `--sites`, the footprint profiles learn how roof height and footprint area relate to those differences. Results are under [Evaluation in the saved artifact](#evaluation-in-the-saved-artifact).
+
+**Facade exposure.** A survey counts birds along the facades the volunteers walked, and Table S2 records that distance for each site, from 32 m (site `u`) to 1,044 m (`aa`). The footprint profiles therefore model collisions per 100 m of facade:
+
+```text
+expected collisions = (facade length / 100 m) × exp(intercept + Σ coefficient × standardized feature)
+```
+
+Training uses the surveyed distance (`surveyed_facade_m`, from the crosswalk's `survey_distance_m`). Scoring uses the candidate building's footprint perimeter (`footprint_perimeter_m`). A building without a perimeter falls back to a profile without building traits. Before this term, a small building received about the same baseline as the study towers, which had long surveyed facades. For example, the median 25–35 m building in the September 10, 2021 Lower Manhattan replay has an 87 m perimeter, and its estimate fell from 1.15 to 0.81 on that heavy night. On ordinary nights such buildings score about 0.1–0.2. The exposure term also improved every holdout metric below.
+
+**There is no trained pre-sunset forecast artifact in this workspace.** The forecast training and scoring code is implemented. With suitable daily inputs, it can currently produce a demo priority while the numeric forecast remains blank.
 
 ## The unit of data
 
@@ -45,7 +64,7 @@ Raw responses are cached under `data/raw/`. The retrospective dashboard also sho
 | Observed | `season_fall`, `observed_migration_birds_per_km_h`, `observed_visibility_m`, `observed_cloud_ceiling_m`, `observed_wind_u_m_s`, `observed_wind_v_m_s`, `observed_temperature_c` | `night_hours` and `potential_moonlit_hours`, matched `roof_height_m` and `footprint_area_m2`, quality-checked `observed_neighborhood_radiance` |
 | Forecast | `season_fall`, `forecast_migration_birds_per_km_h`, `forecast_visibility_m`, `forecast_wind_u_m_s`, `forecast_wind_v_m_s`, `forecast_cloud_cover_pct`, `forecast_precip_rate_mm_h`, `night_hours`, `potential_moonlit_hours` | `forecast_cloud_ceiling_m`, matched `roof_height_m` and `footprint_area_m2`, quality-checked `prior_neighborhood_radiance` available by the cutoff |
 
-The observed artifact has a spring and fall base fit and a fall-only natural-light fit. On the same night, candidate buildings can get identical estimates when they share all fitted inputs. The current replay provides Dryad and astronomy inputs, with geometry for the map. It does not load same-night satellite radiance into the scorer.
+The observed artifact has spring-and-fall fits (`base`, `footprint`) and fall-only fits (`natural_light`, `natural_light+footprint`). A candidate building with a known roof height, footprint area, and perimeter is scored by a footprint profile, so buildings on the same night get different estimates. In the Lower Manhattan replay of September 10, 2021, the 1,427 buildings received 1,366 distinct estimates, from below 0.1 for small sheds to about 8 for 2 World Financial Center, a tall tower with a long facade. NYC footprints record an unknown roof height as `0`. The scorer treats that as missing, so those buildings fall back to the night-level fit. The replay does not load same-night satellite radiance into the scorer.
 
 ### Evaluation in the saved artifact
 
@@ -57,8 +76,47 @@ The chronological split holds out the newest 20% of eligible nights, rounding up
 | Base, unseen buildings | 385 | 1.499 | — | 1.433 | 7.127 |
 | Natural light, future nights | 263 | 1.001 | 0.391 | 0.422 | 1.359 |
 | Natural light, unseen buildings | 259 | 1.935 | 1.865 | 1.853 | 7.901 |
+| Footprint, future nights | 1,397 | 0.921 | 0.895 | 0.861 | 3.96 (base 4.32) |
+| Footprint, unseen buildings | 297 | 1.746 | 1.679 | 1.615 | 8.48 (base 8.75) |
+| Natural light + footprint, future nights | 227 | 1.111 | 0.385 | 0.408 | 1.27 (base 1.44) |
+| Natural light + footprint, unseen buildings | 261 | 2.044 | 1.939 | 1.821 | 7.68 (base 7.87) |
 
-MAE is the average absolute count error per survey. On the same fall rows, adding astronomy improved Poisson deviance on both splits and increased MAE on the future-night split. The report also measures the fraction of observed collisions captured by alerting the top `ceil(0.10 × buildings on that night)` rows. Ties are resolved by study ID. Both saved profiles use shared nightly predictors, so this metric can reflect the tie-break rather than useful within-night building ranking.
+MAE is the average absolute count error per survey. On the same fall rows, adding astronomy improved Poisson deviance on both splits and increased MAE on the future-night split. The footprint profile's unseen-building holdout is the last five matched sites in sorted order: `t`, `u`, `v`, `y`, and `z`. That set includes `y` (3 World Trade Center), the site with the most collisions per night.
+
+The report also measures the fraction of observed collisions captured by alerting the top `ceil(0.10 × buildings on that night)` rows. This metric tests whether the model can tell which buildings will be hit. Profiles without building traits give every building the same estimate on a night, so their ranking comes from the tie-break by study ID.
+
+| Profile and holdout | Collisions captured, seasonal mean | Collisions captured, fitted profile |
+| --- | ---: | ---: |
+| Base, future nights | 0.21 | 0.21 |
+| Base, unseen buildings | 0.04 | 0.04 |
+| Footprint, future nights | 0.22 | **0.27** |
+| Footprint, unseen buildings | 0.02 | **0.39** |
+| Natural light + footprint, future nights | 0.37 | **0.39** |
+| Natural light + footprint, unseen buildings | 0.04 | **0.39** |
+
+On buildings it never saw, the footprint profile catches 39% of collisions in its top 10%, compared with 2% for a ranking without building traits. With facade length handled by the exposure term, roof height carries the building effect. Its coefficient on standardized log height is `+0.29` in the spring-and-fall fit and `+0.46` in the fall fit. The footprint-area coefficients are near zero (`+0.02` and `−0.18`), because a larger footprint mostly means a longer facade, which the exposure term already counts. Per meter of facade, taller buildings have more collisions.
+
+### Computational cost
+
+Measured on an Apple laptop with the cached data and the saved artifact:
+
+| Step | Cost |
+| --- | --- |
+| Load and join the training CSVs (5,422 rows) | 0.04 s |
+| Train all profiles, including both holdout evaluations | 0.45 s, 6 MB peak memory |
+| Saved artifact | 31 KB, 40 learned numbers |
+| Score one building | About 9 µs, roughly 115,000 buildings per second. All of NYC's roughly 1.08 million buildings would take about 9 s. |
+| One-night replay of Lower Manhattan (1,427 buildings) through `main.py --cli` | 1.1 s end to end |
+
+The model is not the bottleneck. A new replay night spends about a minute downloading NEXRAD radar, and the first run for a borough downloads that borough's commercial footprints.
+
+### Known limits and next steps
+
+- **Only 21 matched training buildings,** mostly tall towers in Lower Manhattan. Estimates for short or outer-borough buildings extrapolate beyond the training data, and no collision surveys exist to test them.
+- **No uncertainty intervals.** The model outputs a mean count without a confidence range.
+- **Hand-set regularization.** The L2 penalty of `0.05` was not tuned by cross-validation.
+- **Simpler than the study's model.** Chen et al. (2024) fit negative binomial mixed models with migration × weather interactions, day-of-year polynomials, year effects, and random intercepts for building and volunteer. Their strongest fall effects were interactions: low cloud ceiling and southerly or westerly winds mattered mostly on heavy-migration nights. Adding those interactions, day-of-year terms, and a negative binomial likelihood to `src/models/count.py` is the most direct accuracy improvement. The study's random-effect standard deviation for building was `1.06` in fall (Table S6), which confirms that buildings differ a lot.
+- **No artificial-light coefficients.** No training row has a quality-checked satellite radiance sample yet.
 
 ### A concrete score from the saved data
 
@@ -113,10 +171,20 @@ The recommendation status is `scheduled` for a timed cut or `cap_met` for an app
 Run these commands from the project root with the Python environment active and the requirements installed. [Project setup](README.md)
 
 ```sh
-# Rebuild the saved observed model and evaluation.
+# Build the training inputs (Dryad baseline, then fall 2021 Sun and Moon features).
+python -m src.ingest coverage
+python -m src.ingest --output data/processed/replays/fall-2021 pull --start 2021-08-31 --end 2021-11-14 --skip-satellite
+
+# Write each matched study site's building traits from the verified crosswalk
+# (configs/study_building_bins.csv, built from the study's Table S2; see configs/README.md).
+python -m src.ingest sites --crosswalk configs/study_building_bins.csv
+
+# Rebuild the saved observed model and evaluation. --sites fits the footprint profiles
+# (log roof height, log footprint area) so buildings on the same night differ.
 python -m src.models train \
   --input data/processed/baseline.csv \
   --augment data/processed/replays/fall-2021/training.csv \
+  --sites data/processed/site_features.csv \
   --output data/processed/models/observed.json
 
 # Run a historical replay with the observed model.

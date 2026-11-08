@@ -49,6 +49,27 @@ def _read_training(paths):
     return list(merged.values()), sources
 
 
+def _join_sites(rows, path):
+    """Attach static building traits (from `python -m src.ingest sites`) to every night of each study site."""
+    data = path.read_bytes()
+    traits = {}
+    for row in csv.DictReader(StringIO(data.decode("utf-8-sig"), newline="")):
+        site = (row.get("study_building_id") or "").strip()
+        if not site or site in traits:
+            raise ValueError(f"{path} needs one row per study_building_id")
+        traits[site] = {key: value for key, value in row.items() if key != "study_building_id" and value != ""}
+    for row in rows:
+        if row["study_building_id"] in traits and row.get("feature_location") == "nyc_reference_point":
+            # Replay rows built without a crosswalk used a shared NYC point; the verified match replaces it.
+            del row["feature_location"]
+        for field, value in traits.get(row["study_building_id"], {}).items():
+            if row.get(field, value) != value:
+                raise ValueError(f"Conflicting {field} for site {row['study_building_id']} in {path}")
+            row[field] = value
+    matched = sum(row["study_building_id"] in traits for row in rows)
+    return {"path": str(path), "sha256": sha256(data).hexdigest(), "sites": len(traits), "rows_matched": matched}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -57,11 +78,15 @@ def main():
     command.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Labeled building-night CSV")
     command.add_argument("--augment", type=Path, action="append", default=[],
                          help="Additional CSV to join by study building and night (repeatable)")
+    command.add_argument("--sites", type=Path,
+                         help="Study-site building traits from `python -m src.ingest sites` (enables per-building fits)")
     command.add_argument("--output", type=Path, help="Model and evaluation JSON path")
     args = parser.parse_args()
     output = args.output or (DEFAULT_OBSERVED_MODEL if args.mode == "observed" else DEFAULT_FORECAST_MODEL)
     try:
         rows, sources = _read_training([args.input, *args.augment])
+        if args.sites:
+            sources.append(_join_sites(rows, args.sites))
         model = train(rows, mode=args.mode)
         model.report["sources"] = sources
         model.save(output)
@@ -71,6 +96,14 @@ def main():
     coverage = model.report["profiles"]["base"]["eligible"]
     print(f"Trained {args.mode} model on {coverage['rows']:,} building-nights across {coverage['nights']:,} nights.")
     print(f"Saved model and held-out evaluation to {output}")
+    building = model.report["profiles"].get("footprint", {})
+    if "evaluation" in building:
+        held_out = building["evaluation"]["unseen_buildings"]
+        print(f"Building-level fit: {building['eligible']['rows']:,} rows from {len(building['eligible']['sites'])} "
+              f"sites. Unseen-building error {held_out['poisson']['mean_absolute_count_error']:.3f} vs "
+              f"{held_out['base_poisson_same_rows']['mean_absolute_count_error']:.3f} without building traits.")
+    else:
+        print("No building-level fit: add --sites with a verified crosswalk to learn per-building differences.")
 
 
 if __name__ == "__main__":

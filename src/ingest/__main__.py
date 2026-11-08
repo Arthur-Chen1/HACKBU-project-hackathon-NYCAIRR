@@ -1,6 +1,7 @@
 """Run with python -m src.ingest from the project directory."""
 
 import argparse
+import csv
 import sys
 from collections import defaultdict
 from datetime import date
@@ -226,6 +227,41 @@ def radar(cache, args):
         night += DAY
 
 
+SITE_COLUMNS = ("roof_height_m", "footprint_area_m2", "footprint_perimeter_m", "construction_year", "land_use",
+                "latitude", "longitude")
+
+
+def sites(cache, rows, args):
+    """Write one row of building traits per study site, for `python -m src.models train --sites`."""
+    crosswalk = nyc.crosswalk(args.crosswalk)
+    if not crosswalk:
+        raise ValueError(f"{args.crosswalk} has no study sites")
+    known_sites = {row["study_building_id"] for row in rows}
+    if unknown := crosswalk.keys() - known_sites:
+        raise ValueError(f"Unknown study building IDs in crosswalk: {', '.join(sorted(unknown))}")
+    # The bounds are only a small default query; the crosswalk BINs are fetched wherever they are.
+    buildings = nyc.buildings(cache, nyc.PILOT_BOUNDS, set(crosswalk.values()))
+    if missing := sorted(bin_id for bin_id in crosswalk.values() if bin_id not in buildings):
+        raise ValueError(f"No NYC footprint found for BIN(s) {', '.join(missing)}; check the crosswalk")
+    # Table S2 "Distance (m)": facade length the volunteers surveyed, the exposure behind each count.
+    with args.crosswalk.open(newline="", encoding="utf-8-sig") as file:
+        surveyed = {row["study_building_id"].strip().lower(): row.get("survey_distance_m", "").strip()
+                    for row in csv.DictReader(file)}
+    output = []
+    for site, bin_id in sorted(crosswalk.items()):
+        properties = buildings[bin_id]["properties"]
+        output.append({"study_building_id": site, "bin": bin_id, "name": properties.get("name"),
+                       "feature_location": "matched_footprint",
+                       "surveyed_facade_m": surveyed.get(site) or None,
+                       **{column: properties.get(column) for column in SITE_COLUMNS}})
+    write_csv(args.output / "site_features.csv", output)
+    unmatched = sorted(known_sites - crosswalk.keys())
+    print(f"Wrote building traits for {len(output)} study sites to {args.output / 'site_features.csv'}.")
+    if unmatched:
+        print(f"{len(unmatched)} study sites have no crosswalk entry and train without building traits: "
+              f"{', '.join(unmatched)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, default=Path("data/raw"))
@@ -241,6 +277,9 @@ def main():
     run.add_argument("--skip-satellite", action="store_true", help="Keep a partial dataset without NASA tile downloads")
     run.add_argument("--weather", choices=["observed", "hrrr"], default="observed",
                      help="Use Dryad observations, or also pull archived HRRR forecasts")
+    site_parser = commands.add_parser("sites", help="Write study-site building traits from a verified crosswalk")
+    site_parser.add_argument("--crosswalk", type=Path, default=Path("configs/study_building_bins.csv"),
+                             help="CSV with verified study_building_id and bin columns (from the study's Table S2)")
     sky = commands.add_parser("radar", help="Map migrating birds over NYC from NEXRAD radar, night by night")
     sky.add_argument("--start", type=date.fromisoformat, required=True, help="First local night, YYYY-MM-DD")
     sky.add_argument("--end", type=date.fromisoformat, help="Last local night, inclusive (default: --start)")
@@ -276,6 +315,8 @@ def main():
         rows = list(building_nights(dryad.surveys(cache)))
         if args.command == "coverage":
             coverage(cache, rows, args.output)
+        elif args.command == "sites":
+            sites(cache, rows, args)
         else:
             pull(cache, rows, args)
     except (RequestException, OSError, ValueError) as error:

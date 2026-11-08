@@ -8,6 +8,8 @@ The Python pipeline pulls and caches source data, exports building-night trainin
 
 ```text
 MODEL_DESIGN.md           # Data contracts, model design, and evaluation plan
+MODEL_RUNBOOK.md          # What was trained, metrics, computational cost, and limits
+configs/                  # Verified study-site-to-BIN crosswalk (from the study's Table S2)
 main.py                   # Dashboard and command-line pipeline
 building_analysis.py      # NYC building-night rows and scoring
 lighting_judgement.py     # Lighting decisions and exports
@@ -49,7 +51,7 @@ python -m src.ingest --output data/processed/replays/demo-2021-10-01 pull \
 
 - `--start` and `--end` are inclusive NYC night dates. The default weather mode uses the observations included with Dryad. `--weather hrrr` also adds pre-sunset archived forecasts.
 - For satellite sampling, set `EARTHDATA_TOKEN` in your shell to a download token with LAADS access and omit `--skip-satellite`. The cache retains the downloaded tiles and their retrieval metadata. [Earthdata Login](https://urs.earthdata.nasa.gov/) · [LAADS token instructions](https://ladsweb.modaps.eosdis.nasa.gov/learn/download-files-using-edl-tokens/)
-- To match surveys to footprints, create `configs/study_building_bins.csv` with the header `study_building_id,bin` and supply it with `--crosswalk`. Verify the BINs using study addresses and NYC records. The default query covers Lower Manhattan and includes any verified BINs outside that area. Use `--bounds WEST SOUTH EAST NORTH` to change the map extent. [Study supplement](https://doi.org/10.1111/1365-2664.14590)
+- To match surveys to footprints, pass `--crosswalk configs/study_building_bins.csv`. The file maps 21 of the 27 study sites to verified BINs from the study's Table S2. [configs/README.md](configs/README.md) explains how the matches were checked and why six sites are excluded. The default query covers Lower Manhattan and includes any verified BINs outside that area. Use `--bounds WEST SOUTH EAST NORTH` to change the map extent. [Study supplement](https://doi.org/10.1111/1365-2664.14590)
 
 Start with `training.csv` and check `coverage.json` before selecting features. The saved `fall-2021` and `2021-10-01-hrrr` examples both have partial coverage and a header-only `training_complete.csv`.
 
@@ -59,6 +61,16 @@ Start with `training.csv` and check `coverage.json` before selecting features. T
 | `training_complete.csv` | Rows with a matched footprint, valid natural and artificial light, and the requested weather coverage. |
 | `buildings.geojson` | NYC footprints and available land-use attributes for the requested area and any verified BINs. |
 | `coverage.json` | Row counts, missing footprint matches, and contiguous date windows at each stage of the join. |
+
+## Use the dashboard
+
+Run `python main.py` from the project root, or press Run on `main.py` in VS Code with the `.venv` interpreter selected. A local server starts at `http://127.0.0.1:8765/` and opens in the browser. It uses only the standard library, and the map tiles load from OpenStreetMap.
+
+1. Choose **Historical replay** or **Pre-sunset forecast**, then a preset or an inclusive range of NYC nights, up to 31 nights before today.
+2. Choose an **area**: a borough (Manhattan by default), a Manhattan neighborhood (Midtown or Lower Manhattan), or **Pick grid cells on map** to click up to 9 cells. Cells are the same ~1.1 km grid as the radar analysis and do not need to touch. Borough loads include only lighting-program buildings (land use 4 or 5).
+3. Press **Analyze buildings**. Each night appears in the table as it finishes. Select a night to see the building map colored by priority, the radar density layer, and the migration timeline. Select a building to see its estimate, priority, recommended action, and reasons.
+
+For the command line, use `python main.py --cli`. Use `--area` for a borough, `citywide`, `midtown`, or `pilot`. Use `--cells ROW,COL ...` for grid cells, as in `python main.py --cli --start 2021-09-10 --cells 26,21 27,22`. A new replay night downloads about 100 MB of radar, which takes about a minute. Cached nights load in seconds.
 
 ## Data sources
 
@@ -108,15 +120,20 @@ The command writes these files under `data/processed/radar/<night>/`.
 Use **one row per building per migration night**. Survey rows are keyed by `study_building_id` and `night_date`. Candidate scores use `bin` and `night_date`. The night starts on that date in `America/New_York` and the label comes from the following morning's survey. Use timezone-aware UTC timestamps and keep unknown values blank. [Dataset field definitions](https://doi.org/10.5061/dryad.41ns1rnmw) · [Study supplement](https://doi.org/10.1111/1365-2664.14590)
 
 ```sh
+python -m src.ingest --output data/processed/replays/fall-2021 pull \
+  --start 2021-08-31 --end 2021-11-14 --skip-satellite
+python -m src.ingest sites --crosswalk configs/study_building_bins.csv
+
 python -m src.models train \
   --input data/processed/baseline.csv \
   --augment data/processed/replays/fall-2021/training.csv \
+  --sites data/processed/site_features.csv \
   --output data/processed/models/observed.json
 
 python main.py --cli --start 2021-10-01 --area pilot
 ```
 
-The regularized Poisson model estimates the count a comparable survey would find. The model artifact includes its feature schema, data coverage, and evaluation against a seasonal mean on held-out nights and sites. The retrospective baseline has migration and weather. The fall replay adds Sun and Moon features for 1,190 survey rows. The saved files have no verified study-to-BIN matches or valid neighborhood radiance samples, so this fit has no building or artificial-light coefficients. Candidate buildings can receive the same estimate when their available predictors are shared. Treat scores for additional buildings as provisional.
+The regularized Poisson model estimates the count a comparable survey would find. The model artifact includes its feature schema, data coverage, and evaluation against a seasonal mean on held-out nights and sites. The retrospective baseline has migration and weather. The fall replay adds Sun and Moon features for 1,190 survey rows. `sites` attaches the roof height, footprint area, and surveyed facade length of each matched study building. The model learns building-level differences per 100 m of facade, and it scores each candidate building separately using that building's footprint perimeter as its facade length. On held-out study buildings, flagging each night's top 10% caught 39% of collisions, compared with 2% without building traits. Training takes under a second, and scoring runs at about 115,000 buildings per second. The training buildings are mostly Lower Manhattan towers, so treat scores for very different buildings as provisional. There are no artificial-light coefficients yet. Metrics, costs, and limits are in [MODEL_RUNBOOK.md](MODEL_RUNBOOK.md).
 
 ## Predict a current night
 
@@ -161,7 +178,11 @@ For a building in the lighting program with an available risk priority, the exam
 
 - [x] Export the labeled Dryad baseline and catalog coverage report.
 - [x] Replay fall 2021 with Sun and Moon data and one historical night with archived HRRR.
-- [ ] Verify study-to-BIN matches and replay a night with usable satellite samples.
+- [x] Verify study-to-BIN matches from Table S2 (21 of 27 sites) and train building-level coefficients.
+- [ ] Replay a night with usable satellite samples and fit artificial-light coefficients.
 - [x] Train and evaluate the retrospective collision baseline.
+- [x] Map historical migration from NEXRAD radar and validate it against the study's nightly estimates.
+- [x] Run the dashboard by borough, neighborhood, or selected grid cells.
+- [ ] Add migration × weather interactions, day-of-year terms, and a negative binomial likelihood, as in the study's model.
 - [x] Score daily inputs and calculate scenarios for approved lighting settings.
 - [ ] Backtest forecast-time scores and measure lighting effects with a pilot.
