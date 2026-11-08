@@ -3,6 +3,7 @@
     GET  /                       the dashboard page
     GET  /api/options            areas, weather sources, preset periods
     POST /api/run                {start, end, area, mode, weather, minutes} -> {job}
+                                 area: "midtown" | "pilot" | {"cells": [[row, col], ...]}
     GET  /api/job?id=            {state, log, nights: [overview...], error}
     GET  /api/night?id=&night=   buildings and radar cells GeoJSON, scan timeline, overview
 """
@@ -107,6 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/options":
             return self._send(200, _json({"areas": list(building_analysis.AREAS), "presets": PRESETS,
                                           "weather": ["none", "dryad", "hrrr"], "max_nights": pipeline.MAX_NIGHTS,
+                                          "grid": pipeline.grid_info(),
                                           "today": datetime.now(pipeline.NYC).date()}))
         job = _jobs.get(query.get("id"))
         if url.path == "/api/job":
@@ -131,9 +133,12 @@ class Handler(BaseHTTPRequestHandler):
             forecast = mode == "forecast"
             pipeline.validate(start, end, forecast=forecast)
             area, weather, minutes = body.get("area", "midtown"), body.get("weather", "dryad"), int(body.get("minutes", 60))
-            if (mode not in ("observed", "forecast") or area not in building_analysis.AREAS
+            if isinstance(area, dict):
+                area = area.get("cells") or []
+            pipeline.resolve_area(area)  # Raises ValueError for unknown presets or bad grid cells.
+            if (mode not in ("observed", "forecast")
                     or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60)):
-                raise ValueError("Unsupported mode, area, weather source, or scan interval")
+                raise ValueError("Unsupported mode, weather source, or scan interval")
             daily_inputs = pipeline.load_daily_inputs(self.server.daily_inputs) if forecast else None
         except (KeyError, TypeError, OSError, ValueError) as error:
             return self._error(400, str(error))
