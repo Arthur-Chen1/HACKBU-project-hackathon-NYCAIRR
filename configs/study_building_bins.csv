@@ -1,0 +1,22 @@
+study_building_id,bin,survey_distance_m,table_s2_address,matched_address,footprint_check
+a,1085929,178,212 Warren St.,212 Warren Street,84 m; built 2016
+b,1087239,273,200 West St. (Goldman Sachs),200 West Street,226 m; built 2006
+c,1088469,256,1 World Trade Center (Freedom Tower),285 Fulton Street,429 m; footprint name Tower 1 World Trade Ctr
+d,1086510,262,7 World Trade Center (Moody's),250 Greenwich Street,227 m; footprint name 7 World Trade Center
+e,1001416,263,101 Barclay St. (Bank of NY),101 Barclay Street,106 m; built 1983
+f,1001027,205,140 Broadway,140 Broadway,207 m; built 1968
+g,1001021,254,28 Liberty St.,28 Liberty Street,250 m; footprint name One Chase Manhattan Plaza
+h,1001162,247,199 Water St. (1 Seaport Plaza),199 Water Street,135 m; built 1993
+i,1000874,235,180 Maiden Lane,180 Maiden Lane,182 m; built 1982
+j,1000867,237,32 Old Slip,32 Old Slip,168 m; built 1987
+k,1083346,315,55 Water St.,55 Water Street,217 m; built 1973
+l,3401675,359,1 Hotel Brooklyn Bridge Park,60 Furman Street (Brooklyn),39 m; Table S2 also lists this hotel as r (fall 2021 facades) but the Dryad data has no rows coded r
+m,1090258,150,285 W 110th St. (Circa Central Park),285 West 110 Street,37 m; built 2017
+n,4307108,221,One Court Square,1 Court Square (Queens),193 m; built 1987
+q,1083810,379,1000 5th Ave (Metropolitan Museum of Art),1000 5 Avenue,27 m; footprint name The Metropolitan Museum
+t,3398406,196,44 Water St.,44 Water Street (Brooklyn),52 m; built 2016
+u,1090808,32,145 Central Park North,145 Central Park North,41 m; built 2020
+v,1026318,161,10 Columbus Circle (Time Warner Center),10 Columbus Circle,218 m; footprint name Time Warner Center
+y,1088797,304,3 World Trade Center,175 Greenwich Street,324 m; built 2009
+z,1088795,319,4 World Trade Center,150 Greenwich Street,298 m; footprint name Tower 4 World Trade Ctr
+aa,1000060,1044,230 Vesey St. (Brookfield Place),230 Vesey Street,153 m; footprint name 4 World Financial Center (survey route spans the Brookfield Place complex)
