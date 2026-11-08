@@ -8,8 +8,9 @@ from pathlib import Path
 
 from requests import RequestException
 
+from src.features import birds
 from src.features.training import DAY, building_nights, date_coverage, write_csv, write_json
-from src.ingest import dryad, hrrr, nyc, usno, viirs
+from src.ingest import dryad, hrrr, nexrad, nyc, usno, viirs
 from src.ingest.http import Cache
 
 RADIANCE_COLUMNS = (
@@ -134,6 +135,90 @@ def pull(cache, rows, args):
     print(f"See {output / 'coverage.json'} for exact date windows.")
 
 
+def _cell_features(cells, bounds):
+    by_cell = defaultdict(list)
+    for cell in cells:
+        if cell["birds_per_km2"] is not None:
+            by_cell[cell["cell_row"], cell["cell_col"]].append(cell)
+    for (row, col), samples in sorted(by_cell.items()):
+        west, south, east, north = birds.cell_bounds(row, col, bounds)
+        peak = max(samples, key=lambda cell: cell["birds_per_km2"])
+        traffic = [cell["migration_traffic_birds_per_km_h"] for cell in samples
+                   if cell["migration_traffic_birds_per_km_h"] is not None]
+        yield {
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [west, south], [east, south], [east, north], [west, north], [west, south]]]},
+            "properties": {
+                "cell_row": row, "cell_col": col, "scans": len(samples),
+                "mean_birds_per_km2": sum(cell["birds_per_km2"] for cell in samples) / len(samples),
+                "peak_birds_per_km2": peak["birds_per_km2"], "peak_scan_utc": peak["scan_time_utc"],
+                "mean_migration_traffic_birds_per_km_h": sum(traffic) / len(traffic) if traffic else None,
+            },
+        }
+
+
+def radar(cache, args):
+    observed = {}
+    if args.compare_dryad:
+        observed = {row["night_date"]: row["observed_migration_birds_per_km_h"] for row in dryad.surveys(cache)}
+    night = args.start
+    while night <= args.end:
+        natural = usno.natural_light(cache, night)
+        found = nexrad.scans(cache.session, args.site, natural["sunset_utc"], natural["sunrise_utc"])
+        chosen = nexrad.every(found, args.minutes)
+        print(f"{night}: {len(chosen)} of {len(found)} {args.site} scans between sunset and sunrise",
+              file=sys.stderr, flush=True)
+        profiles, scans, cells = [], [], []
+        for index, (when, url) in enumerate(chosen):
+            try:
+                volume = nexrad.read(cache, url)
+            except (RequestException, OSError, ValueError, IndexError) as error:
+                print(f"  skipped {when:%H:%M}Z: {error}", file=sys.stderr)
+                continue
+            swept = birds.sweeps(volume)
+            layers = birds.profile(swept)
+            scan = birds.summarize(layers)
+            following = chosen[index + 1][0] if index + 1 < len(chosen) else natural["sunrise_utc"]
+            scan_meta = {"scan_time_utc": when, "hours_represented": (following - when).total_seconds() / 3600}
+            scans.append({**scan_meta, **scan})
+            profiles.extend({"scan_time_utc": when, **layer} for layer in layers)
+            cells.extend({"scan_time_utc": when, **cell} for cell in birds.grid(swept, layers, scan, args.bounds))
+            print(f"  {when:%H:%M}Z  {scan['birds_per_km2']:7.1f} birds/km2  "
+                  f"traffic {scan['migration_traffic_birds_per_km_h'] or 0:7.0f} birds/km/h", file=sys.stderr)
+
+        folder = args.output / "radar" / night.isoformat()
+        write_csv(folder / "profiles.csv", profiles)
+        write_csv(folder / "scans.csv", scans)
+        write_csv(folder / "cells.csv", cells)
+        write_json(folder / "cells.geojson", {"type": "FeatureCollection",
+                                              "features": list(_cell_features(cells, args.bounds))})
+        complete = [scan for scan in scans if scan["profile_complete"]]
+        traffic = [scan for scan in complete if scan["migration_traffic_birds_per_km_h"] is not None]
+        peak = max(complete, key=lambda scan: scan["birds_per_km2"], default=None)
+        moving = [scan for scan in traffic if scan["direction_deg"] is not None]
+        summary = {
+            "night_date": night, "site": args.site, "radar_location": nexrad.SITE_LOCATION.get(args.site),
+            "sunset_utc": natural["sunset_utc"], "sunrise_utc": natural["sunrise_utc"],
+            "scans_available": len(found), "scans_processed": len(scans), "scans_with_complete_profile": len(complete),
+            "mean_birds_per_km2": sum(scan["birds_per_km2"] for scan in complete) / len(complete) if complete else None,
+            "peak_birds_per_km2": peak["birds_per_km2"] if peak else None,
+            "peak_scan_utc": peak["scan_time_utc"] if peak else None,
+            "mean_migration_traffic_birds_per_km_h":
+                sum(scan["migration_traffic_birds_per_km_h"] for scan in traffic) / len(traffic) if traffic else None,
+            # Birds crossing a 1 km line over the night; each scan stands for the time until the next one.
+            "nightly_traffic_birds_per_km": sum(scan["migration_traffic_birds_per_km_h"] * scan["hours_represented"]
+                                                for scan in traffic) if traffic else None,
+            "traffic_weighted_direction_deg": birds.mean_direction(moving),
+            "dryad_observed_migration_birds_per_km_h": observed.get(night),
+            "grid_bounds": list(args.bounds),
+            "method": "vol2bird-style profile within 5-35 km of the radar, range-corrected to ~1 km NYC cells",
+        }
+        write_json(folder / "summary.json", summary)
+        print(f"  wrote {folder}", file=sys.stderr)
+        night += DAY
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, default=Path("data/raw"))
@@ -149,7 +234,23 @@ def main():
     run.add_argument("--skip-satellite", action="store_true", help="Keep a partial dataset without NASA tile downloads")
     run.add_argument("--weather", choices=["observed", "hrrr"], default="observed",
                      help="Use Dryad observations, or also pull archived HRRR forecasts")
+    sky = commands.add_parser("radar", help="Map migrating birds over NYC from NEXRAD radar, night by night")
+    sky.add_argument("--start", type=date.fromisoformat, required=True, help="First local night, YYYY-MM-DD")
+    sky.add_argument("--end", type=date.fromisoformat, help="Last local night, inclusive (default: --start)")
+    sky.add_argument("--site", default=nexrad.SITE, help="NEXRAD site ID")
+    sky.add_argument("--minutes", type=int, default=30, help="Process at most one volume scan per this many minutes")
+    sky.add_argument("--bounds", type=float, nargs=4, default=nyc.CITY_BOUNDS,
+                     metavar=("WEST", "SOUTH", "EAST", "NORTH"), help="Grid bounds in WGS84")
+    sky.add_argument("--compare-dryad", action="store_true",
+                     help="Add the Dryad study's nightly migration estimate to summary.json")
     args = parser.parse_args()
+
+    if args.command == "radar":
+        args.end = args.end or args.start
+        if args.start > args.end:
+            parser.error("--start must be on or before --end")
+        if args.minutes < 1:
+            parser.error("--minutes must be at least 1")
 
     if args.command == "pull":
         if args.start > args.end:
@@ -161,6 +262,9 @@ def main():
 
     cache = Cache(args.cache)
     try:
+        if args.command == "radar":
+            radar(cache, args)
+            return
         rows = list(building_nights(dryad.surveys(cache)))
         if args.command == "coverage":
             coverage(cache, rows, args.output)

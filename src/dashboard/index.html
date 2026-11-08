@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DarkSky Migrations</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb;
+    --accent: #2b59c3; --off: #c0392b; --dim: #e67e22; --reduce: #f1c40f; --none: #b8bec8;
+    --high: #c0392b; --medium: #e67e22; --low: #2e8b57; --unknown: #7f8c8d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { padding: 14px 20px; background: #101828; color: #fff; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; }
+  header span { color: #b6c0d4; font-size: 13px; }
+  .layout { display: grid; grid-template-columns: 360px 1fr; gap: 16px; padding: 16px; min-height: calc(100vh - 52px); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  select, input { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; background: #fff; color: var(--ink); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  button { margin-top: 12px; width: 100%; padding: 9px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  #log { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 130px; overflow: auto; white-space: pre-wrap; }
+  #error { color: var(--off); font-size: 13px; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #f0f3fa; }
+  tbody tr.selected { background: #e5ecfb; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; color: #fff; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px 22px; }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat > span { font-size: 12px; color: var(--muted); }
+  .basemap { filter: grayscale(1) contrast(.85) brightness(1.08); }
+  #note { margin-top: 8px; font-size: 13px; color: var(--dim); }
+  #map { height: 520px; border-radius: 10px; border: 1px solid var(--line); }
+  .bottom { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; }
+  .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  #timeline svg { width: 100%; height: 190px; display: block; }
+  #detail ul { margin: 8px 0 0; padding-left: 18px; }
+  #detail li { margin: 3px 0; }
+  .empty { color: var(--muted); font-size: 13px; }
+  @media (max-width: 980px) { .layout, .bottom { grid-template-columns: 1fr; } #map { height: 420px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>DarkSky Migrations</h1>
+  <span>Building-night collision estimates and lighting recommendations</span>
+</header>
+<div class="layout">
+  <div class="side">
+    <div class="card">
+      <h2>Analysis period</h2>
+      <label for="mode">Mode</label>
+      <select id="mode"><option value="observed">Historical replay</option><option value="forecast">Pre-sunset forecast</option></select>
+      <label for="preset">Preset</label>
+      <select id="preset"><option value="">Custom dates…</option></select>
+      <div class="row2">
+        <div><label for="start">First night</label><input type="date" id="start" value="2021-09-10"></div>
+        <div><label for="end">Last night</label><input type="date" id="end" value="2021-09-10"></div>
+      </div>
+      <div class="row2">
+        <div><label for="area">Area</label><select id="area"></select></div>
+        <div id="replayWeather"><label for="weather">Replay weather</label>
+          <select id="weather">
+            <option value="dryad">Observed (Dryad, 2017–21)</option>
+            <option value="none">Not used</option>
+            <option value="hrrr">Forecast (NOAA HRRR)</option>
+          </select></div>
+      </div>
+      <div id="radarOptions"><label for="minutes">Radar scans</label>
+        <select id="minutes"><option value="60">Hourly (faster)</option><option value="30">Every 30 min (finer)</option></select></div>
+      <button id="run">Analyze buildings</button>
+      <div class="hint" id="modeHint">A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.</div>
+      <div id="error"></div>
+    </div>
+    <div class="card">
+      <h2>Progress</h2>
+      <div id="log" class="empty">Choose a period and press Run.</div>
+    </div>
+    <div class="card">
+      <h2>Nights in period</h2>
+      <table>
+        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">High</th><th class="num">Review</th></tr></thead>
+        <tbody id="nights"></tbody>
+      </table>
+      <div class="hint">Click a night to map it.</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="card">
+      <h2 id="nightTitle">No night selected</h2>
+      <div class="stats" id="stats"></div>
+      <div id="note"></div>
+    </div>
+    <div>
+      <div id="map"></div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--high)"></i>High priority</span>
+        <span><i class="swatch" style="background:var(--medium)"></i>Medium priority</span>
+        <span><i class="swatch" style="background:var(--low)"></i>Low priority</span>
+        <span><i class="swatch" style="background:var(--unknown)"></i>Unavailable</span>
+        <span><i class="swatch" style="background:#3b6fd8;opacity:.5"></i>Radar: birds relative to NYC tonight (darker = more)</span>
+        <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">
+          <input type="checkbox" id="showCells" checked style="width:auto"> Radar layer</label>
+      </div>
+    </div>
+    <div class="bottom">
+      <div class="card"><h2>Migration through the night</h2><div id="timeline" class="empty">Run a period to see the radar timeline.</div></div>
+      <div class="card"><h2>Building</h2><div id="detail" class="empty">Click a building on the map.</div></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const priorityColor = p => css('--' + (p === 'unavailable' ? 'unknown' : p));
+const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
+const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const map = L.map('map').setView([40.755, -73.985], 14);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, className: 'basemap' }).addTo(map);
+let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null;
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.statusText);
+  return body;
+}
+
+async function init() {
+  const options = await api('/api/options');
+  for (const area of options.areas) $('area').add(new Option(area[0].toUpperCase() + area.slice(1), area));
+  $('area').value = 'midtown';
+  options.presets.forEach((p, i) => $('preset').add(new Option(p.label, i)));
+  $('preset').onchange = () => {
+    const p = options.presets[$('preset').value];
+    if (p) {
+      $('mode').value = 'observed';
+      updateMode();
+      $('start').value = p.start; $('end').value = p.end;
+    }
+  };
+  function updateMode() {
+    const forecast = $('mode').value === 'forecast';
+    $('replayWeather').hidden = $('radarOptions').hidden = forecast;
+    $('modeHint').textContent = forecast
+      ? 'Uses HRRR weather and the issued migration forecast from the configured daily input file.'
+      : 'A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.';
+  }
+  $('mode').onchange = () => {
+    updateMode();
+    const night = $('mode').value === 'forecast' ? options.today : options.presets[0].start;
+    $('start').value = $('end').value = night;
+    $('preset').value = '';
+  };
+  for (const id of ['start', 'end']) $(id).oninput = () => $('preset').value = '';
+}
+
+$('run').onclick = async () => {
+  $('error').textContent = '';
+  if ($('end').value < $('start').value) $('end').value = $('start').value;
+  try {
+    const { job: id } = await api('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start: $('start').value, end: $('end').value, area: $('area').value,
+                             mode: $('mode').value, weather: $('weather').value, minutes: Number($('minutes').value) }) });
+    job = id; selected = null; $('run').disabled = true; $('nights').innerHTML = '';
+    $('log').classList.remove('empty'); $('log').textContent = 'Starting…';
+    clearInterval(poll); poll = setInterval(refresh, 1500); refresh();
+  } catch (e) { $('error').textContent = e.message; }
+};
+
+async function refresh() {
+  const state = await api(`/api/job?id=${job}`);
+  $('log').textContent = state.log.join('\n') || 'Starting…';
+  $('log').scrollTop = $('log').scrollHeight;
+  renderTable(state.nights);
+  if (!selected) { const first = state.nights.find(n => !n.error); if (first) selectNight(first.night); }
+  if (state.state !== 'running') {
+    clearInterval(poll); $('run').disabled = false;
+    if (state.error) $('error').textContent = state.error;
+  }
+}
+
+function renderTable(nights) {
+  $('nights').innerHTML = nights.map(n => n.error
+    ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--off)">${esc(n.error)}</td></tr>`
+    : `<tr data-night="${n.night}" class="${n.night === selected ? 'selected' : ''}">
+        <td>${n.night}</td><td><span class="badge" style="background:${css('--' + n.level)}">${n.level}</span></td>
+        <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.priorities.high || 0)}</td>
+        <td class="num">${fmt(n.tiers.review)}</td></tr>`).join('');
+  for (const tr of $('nights').querySelectorAll('tr[data-night]')) tr.onclick = () => selectNight(tr.dataset.night);
+}
+
+async function selectNight(night) {
+  selected = night;
+  for (const tr of $('nights').querySelectorAll('tr')) tr.classList.toggle('selected', tr.dataset.night === night);
+  const data = await api(`/api/night?id=${job}&night=${night}`);
+  renderSummary(data.overview); renderMap(data); renderTimeline(data.scans);
+  $('detail').className = 'empty'; $('detail').textContent = 'Click a building on the map.';
+}
+
+function renderSummary(o) {
+  $('nightTitle').textContent = `Night of ${o.night}` + (o.sunset_local ? ` · sunset ${o.sunset_local} to sunrise ${o.sunrise_local}` : '');
+  const stat = (value, label) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
+  $('stats').innerHTML = [
+    stat(`<span class="badge" style="background:${css('--' + o.level)};font-size:13px">${o.level}</span>`, 'migration level'),
+    stat(fmt(o.traffic_birds_per_km_h), 'birds / km / h (mean)'),
+    stat(`${fmt(o.scored_buildings)} / ${fmt(o.buildings)}`, 'building-nights with expected counts'),
+    stat(`${fmt(o.priorities.high || 0)} / ${fmt(o.priorities.medium || 0)} / ${fmt(o.priorities.low || 0)}`, 'high / medium / low priority'),
+    stat(`${fmt(o.tiers.off)} / ${fmt(o.tiers.dim)} / ${fmt(o.tiers.reduce)}`, `off / dim / reduce of ${fmt(o.buildings)}`),
+  ].join('');
+  const context = o.mode === 'observed' ? `${o.scans_used} of ${o.scans_processed} radar scans usable`
+    : (o.decision_at_utc ? `Forecast cutoff ${o.decision_at_utc}` : 'Forecast cutoff unavailable');
+  $('note').textContent = [o.note, o.weather, context].filter(Boolean).join(' · ');
+}
+
+function renderMap(data) {
+  if (cellLayer) map.removeLayer(cellLayer);
+  if (buildingLayer) map.removeLayer(buildingLayer);
+  const values = data.cells.features.map(f => f.properties.mean_birds_per_km2);
+  const top = Math.max(1, ...values);
+  cellLayer = L.geoJSON(data.cells, { interactive: false, style: f => ({
+    stroke: false, fillColor: '#3b6fd8', fillOpacity: 0.08 + 0.45 * (f.properties.mean_birds_per_km2 / top) }) });
+  if ($('showCells').checked) cellLayer.addTo(map);
+  buildingLayer = L.geoJSON(data.buildings, {
+    style: f => ({ color: '#444', weight: 0.4, fillColor: priorityColor(f.properties.risk_priority), fillOpacity: 0.85 }),
+    onEachFeature: (f, layer) => layer.on('click', () => renderDetail(f.properties)),
+  }).addTo(map);
+  if (data.buildings.features.length) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] });
+}
+$('showCells').onchange = () => cellLayer && ($('showCells').checked ? cellLayer.addTo(map) : map.removeLayer(cellLayer));
+
+function renderDetail(p) {
+  $('detail').className = '';
+  const window = p.start_local ? `${p.start_local} to ${p.end_local}` : '';
+  const reduction = p.reduction_pct == null ? '' : ` · ${fmt(p.reduction_pct)}% reduction`;
+  const output = p.projected_artificial_light_output == null ? ''
+    : `<div>Projected light output ${fmt(p.projected_artificial_light_output, 2)} ${esc(p.light_output_unit)}
+       · cap ${fmt(p.target_artificial_light_output, 2)} ${esc(p.light_output_unit)}</div>`;
+  $('detail').innerHTML = `
+    <div><b>${esc(p.name || 'BIN ' + p.bin)}</b> ${p.name ? `<span class="empty">BIN ${p.bin}</span>` : ''}</div>
+    <div class="empty">${esc(p.land_use || 'Unknown use')} · ${fmt(p.height_m)} m${p.year ? ' · built ' + p.year : ''}</div>
+    <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)}</span>
+      <b style="margin-left:6px">${fmt(p.expected_collision_count, 3)} expected collisions</b> · ${esc(p.risk_basis)}</p>
+    <div>${esc(p.action)}${reduction}${window ? ' · ' + esc(window) : ''}</div>
+    ${output}
+    <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;
+}
+
+function renderTimeline(scans) {
+  if (!scans.length) { $('timeline').className = 'empty'; $('timeline').textContent = 'No radar scans for this night.'; return; }
+  $('timeline').className = '';
+  const W = 600, H = 190, pad = { l: 44, r: 8, t: 10, b: 34 };
+  const top = Math.max(1, ...scans.map(s => s.birds_per_km2 || 0));
+  const bw = (W - pad.l - pad.r) / scans.length;
+  const y = v => H - pad.b - (H - pad.t - pad.b) * (v / top);
+  const bars = scans.map((s, i) => {
+    const v = s.complete ? (s.birds_per_km2 || 0) : 0, x = pad.l + i * bw;
+    const title = `${s.time_local}: ${s.complete ? fmt(s.birds_per_km2) + ' birds/km², ' + fmt(s.traffic) + ' birds/km/h, heading ' + compass(s.direction_deg) : 'unusable (rain)'}`;
+    return `<rect x="${x + 1}" y="${s.complete ? y(v) : pad.t}" width="${Math.max(1, bw - 2)}" height="${s.complete ? H - pad.b - y(v) : H - pad.t - pad.b}"
+      fill="${s.complete ? '#3b6fd8' : '#e3e6eb'}" rx="2"><title>${title}</title></rect>` +
+      (i % Math.ceil(scans.length / 8) === 0 ? `<text x="${x + bw / 2}" y="${H - 12}" font-size="10" text-anchor="middle" fill="#667085">${s.time_local}</text>` : '');
+  }).join('');
+  const ticks = [0, top / 2, top].map(v => `<text x="${pad.l - 6}" y="${y(v) + 3}" font-size="10" text-anchor="end" fill="#667085">${fmt(v)}</text>
+    <line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}" stroke="#eef0f3"/>`).join('');
+  $('timeline').innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${ticks}${bars}
+    <text x="4" y="${pad.t + 4}" font-size="10" fill="#667085" transform="rotate(-90 10 ${H / 2})" text-anchor="middle"></text></svg>
+    <div class="hint">Birds per km² in the air over the radar's area, per scan (local time). Gray = rain or unusable. Hover a bar for details.</div>`;
+}
+
+init().catch(e => $('error').textContent = 'Could not reach the dashboard server: ' + e.message);
+</script>
+</body>
+</html>

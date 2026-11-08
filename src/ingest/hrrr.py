@@ -20,10 +20,14 @@ FIELDS = {
 }
 
 
-def forecast_hours(sunset, sunrise):
-    decision = sunset - HOUR
+def forecast_hours(sunset, sunrise, *, decision_at=None):
+    cutoff = sunset - HOUR
+    decision = cutoff if decision_at is None else min(cutoff, decision_at)
     # Allow two hours for publication of the initialized run and all its leads.
     run = (decision - 2 * HOUR).replace(minute=0, second=0, microsecond=0)
+    if (sunrise - run) // HOUR > 18:
+        # CONUS cycles at 00, 06, 12 and 18 UTC extend through lead 48.
+        run -= (run.hour % 6) * HOUR
     valid = sunset.replace(minute=0, second=0, microsecond=0)
     if valid < sunset:
         valid += HOUR
@@ -55,10 +59,12 @@ def _nearest(path, points, field):
         codes_release(message)
 
 
-def weather_forecast(cache, sunset, sunrise, points):
-    decision, run, leads = forecast_hours(sunset, sunrise)
+def weather_forecast(cache, sunset, sunrise, points, *, decision_at=None):
+    decision, run, leads = forecast_hours(sunset, sunrise, decision_at=decision_at)
     samples = defaultdict(lambda: defaultdict(list))
     for lead in leads:
+        if lead > 48:
+            break
         url = f"{ARCHIVE}/hrrr.{run:%Y%m%d}/conus/hrrr.t{run:%H}z.wrfsfcf{lead:02d}.grib2"
         try:
             index = cache.get("hrrr", url + ".idx").read_text()
