@@ -91,6 +91,15 @@
           <button type="button" id="gridClear" class="secondary">Clear selection</button>
         </div>
       </div>
+      <div id="forecastOptions" hidden>
+        <div class="row2">
+          <div><label for="migrationForecast">Migration forecast (birds/km/h)</label>
+            <input type="number" id="migrationForecast" min="0" step="any" placeholder="Automatic estimate"></div>
+          <div><label for="migrationIssued">Issued at (New York time)</label>
+            <input type="datetime-local" id="migrationIssued"></div>
+        </div>
+        <div class="hint">Enter a regional forecast such as BirdCast's, with the time it was issued. It must be issued before the cutoff, one hour before sunset. Leave it blank to use the daily input file or, without one, an estimate from tonight's HRRR weather and past migration seasons.</div>
+      </div>
       <div id="radarOptions"><label for="minutes">Radar scans</label>
         <select id="minutes"><option value="60">Hourly (faster)</option><option value="30">Every 30 min (finer)</option></select></div>
       <button id="run">Analyze buildings</button>
@@ -119,10 +128,12 @@
     <div>
       <div id="map"></div>
       <div class="legend">
-        <span><i class="swatch" style="background:var(--high)"></i>High priority</span>
-        <span><i class="swatch" style="background:var(--medium)"></i>Medium priority</span>
-        <span><i class="swatch" style="background:var(--low)"></i>Low priority</span>
-        <span><i class="swatch" style="background:var(--unknown)"></i>Unavailable</span>
+        <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">Color buildings by
+          <select id="colorBy" style="width:auto;padding:3px 6px">
+            <option value="relative">Risk relative to tonight</option>
+            <option value="priority">Priority (absolute)</option>
+          </select></label>
+        <span id="buildingLegend" style="display:contents"></span>
         <span><i class="swatch" style="background:#3b6fd8;opacity:.5"></i>Radar: birds relative to NYC tonight (darker = more)</span>
         <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">
           <input type="checkbox" id="showCells" checked style="width:auto"> Radar layer</label>
@@ -138,6 +149,43 @@
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const priorityColor = p => css('--' + (p === 'unavailable' ? 'unknown' : p));
+// Ordered single-hue ramp (light = lower, dark = higher), lightest step >= 2:1 on the basemap.
+const RELATIVE_BINS = [
+  { label: 'Bottom 75%', top: 1.00, color: '#ec9060' },
+  { label: 'Top 25%', top: 0.25, color: '#e46f38' },
+  { label: 'Top 10%', top: 0.10, color: '#cc5220' },
+  { label: 'Top 5%', top: 0.05, color: '#9e3c15' },
+  { label: 'Top 1%', top: 0.01, color: '#6b260a' },
+];
+const PRIORITY_LEGEND = [['high', 'High priority'], ['medium', 'Medium priority'], ['low', 'Low priority']];
+
+// Rank each building's expected count among tonight's scored buildings (1 = highest).
+function rankBuildings(features) {
+  const scored = features.filter(f => f.properties.expected_collision_count != null)
+    .sort((a, b) => b.properties.expected_collision_count - a.properties.expected_collision_count);
+  scored.forEach((f, i) => {
+    const ties = i && scored[i - 1].properties.expected_collision_count === f.properties.expected_collision_count;
+    f.properties._rank = ties ? scored[i - 1].properties._rank : i + 1;
+    f.properties._scored = scored.length;
+  });
+}
+function relativeBin(p) {
+  if (p._rank == null) return null;
+  const share = p._rank / p._scored;
+  return [...RELATIVE_BINS].reverse().find(bin => share <= bin.top);
+}
+function buildingColor(p) {
+  if ($('colorBy').value === 'priority') return priorityColor(p.risk_priority);
+  const bin = relativeBin(p);
+  return bin ? bin.color : css('--unknown');
+}
+function renderLegend() {
+  const swatch = (color, label) => `<span><i class="swatch" style="background:${color}"></i>${label}</span>`;
+  const items = $('colorBy').value === 'priority'
+    ? PRIORITY_LEGEND.map(([key, label]) => swatch(css('--' + key), label))
+    : RELATIVE_BINS.map(bin => swatch(bin.color, bin.label));
+  $('buildingLegend').innerHTML = [...items, swatch(css('--unknown'), 'Unavailable')].join('');
+}
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -148,7 +196,7 @@ const map = L.map('map', { preferCanvas: true, minZoom: 10, maxBounds: nycBounds
   .setView(nycBounds.getCenter(), 10);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, className: 'basemap' }).addTo(map);
-let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null;
+let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null, nightData = null;
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -253,16 +301,20 @@ async function init() {
   $('preset').onchange = () => {
     const p = options.presets[$('preset').value];
     if (p) {
-      $('mode').value = 'observed';
+      $('mode').value = p.mode || 'observed';
       updateMode();
       $('start').value = p.start; $('end').value = p.end;
+      $('migrationForecast').value = p.migration_forecast ?? '';
+      if (p.migration_issued) $('migrationIssued').value = p.migration_issued;
     }
   };
   function updateMode() {
     const forecast = $('mode').value === 'forecast';
     $('replayWeather').hidden = $('radarOptions').hidden = forecast;
+    $('forecastOptions').hidden = !forecast;
+    if (forecast && !$('migrationIssued').value) $('migrationIssued').value = options.now_local;
     $('modeHint').textContent = forecast
-      ? 'Uses HRRR weather and the issued migration forecast from the configured daily input file.'
+      ? 'The forecast AI model scores each building from HRRR weather, the issued migration forecast, the date, and building height, size, and facade length.'
       : 'A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.';
   }
   $('mode').onchange = () => {
@@ -283,7 +335,9 @@ $('run').onclick = async () => {
   try {
     const { job: id } = await api('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start: $('start').value, end: $('end').value, area,
-                             mode: $('mode').value, weather: $('weather').value, minutes: Number($('minutes').value) }) });
+                             mode: $('mode').value, weather: $('weather').value, minutes: Number($('minutes').value),
+                             migration_forecast: $('mode').value === 'forecast' ? $('migrationForecast').value : '',
+                             migration_issued: $('migrationIssued').value }) });
     job = id; selected = null; $('run').disabled = true; $('nights').innerHTML = '';
     $('log').classList.remove('empty'); $('log').textContent = 'Starting…';
     clearInterval(poll); poll = setInterval(refresh, 1500); refresh();
@@ -328,14 +382,21 @@ function renderSummary(o) {
     stat(fmt(o.traffic_birds_per_km_h), 'birds / km / h (mean)'),
     stat(`${fmt(o.scored_buildings)} / ${fmt(o.buildings)}`, 'building-nights with expected counts'),
     stat(`${fmt(o.priorities.high || 0)} / ${fmt(o.priorities.medium || 0)} / ${fmt(o.priorities.low || 0)}`, 'high / medium / low priority'),
+    stat(fmt(o.max_expected_collision_count, 2), 'highest expected collisions'),
     stat(`${fmt(o.tiers.off)} / ${fmt(o.tiers.dim)} / ${fmt(o.tiers.reduce)}`, `off / dim / reduce of ${fmt(o.buildings)}`),
   ].join('');
   const context = o.mode === 'observed' ? `${o.scans_used} of ${o.scans_processed} radar scans usable`
     : (o.decision_at_utc ? `Forecast cutoff ${o.decision_at_utc}` : 'Forecast cutoff unavailable');
-  $('note').textContent = [o.note, o.weather, context].filter(Boolean).join(' · ');
+  const quiet = o.scored_buildings && !o.priorities.high && !o.priorities.medium
+    ? `Quiet night: no building reaches medium priority (0.25 expected collisions). The map shades buildings by risk relative to tonight.`
+    : '';
+  $('note').textContent = [quiet, o.note, o.model, o.weather, context].filter(Boolean).join(' · ');
 }
 
-function renderMap(data) {
+function renderMap(data, refit = true) {
+  nightData = data;
+  rankBuildings(data.buildings.features);
+  renderLegend();
   if (cellLayer) map.removeLayer(cellLayer);
   if (buildingLayer) map.removeLayer(buildingLayer);
   const values = data.cells.features.map(f => f.properties.mean_birds_per_km2);
@@ -344,13 +405,15 @@ function renderMap(data) {
     stroke: false, fillColor: '#3b6fd8', fillOpacity: 0.08 + 0.45 * (f.properties.mean_birds_per_km2 / top) }) });
   if ($('showCells').checked) cellLayer.addTo(map);
   buildingLayer = L.geoJSON(data.buildings, {
-    style: f => ({ color: '#444', weight: 0.4, fillColor: priorityColor(f.properties.risk_priority), fillOpacity: 0.85 }),
+    style: f => ({ color: '#444', weight: 0.4, fillColor: buildingColor(f.properties), fillOpacity: 0.85 }),
     bubblingMouseEvents: false,  // A building click shouldn't also toggle the grid cell under it.
     onEachFeature: (f, layer) => layer.on('click', () => renderDetail(f.properties)),
   }).addTo(map);
-  if (data.buildings.features.length) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] });
+  if (data.buildings.features.length) { if (refit) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] }); }
   else $('note').textContent += ' · No buildings in the lighting program inside this area (water, parks, or residential only).';
 }
+$('colorBy').onchange = () => { renderLegend(); if (nightData) renderMap(nightData, false); };
+renderLegend();
 $('showCells').onchange = () => cellLayer && ($('showCells').checked ? cellLayer.addTo(map) : map.removeLayer(cellLayer));
 
 function renderDetail(p) {
@@ -365,6 +428,7 @@ function renderDetail(p) {
     <div class="empty">${esc(p.land_use || 'Unknown use')} · ${fmt(p.height_m)} m${p.year ? ' · built ' + p.year : ''}</div>
     <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)}</span>
       <b style="margin-left:6px">${fmt(p.expected_collision_count, 3)} expected collisions</b> · ${esc(p.risk_basis)}</p>
+    ${p._rank ? `<div>Rank ${fmt(p._rank)} of ${fmt(p._scored)} buildings tonight (${relativeBin(p).label.toLowerCase()})</div>` : ''}
     <div>${esc(p.action)}${reduction}${window ? ' · ' + esc(window) : ''}</div>
     ${output}
     <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;

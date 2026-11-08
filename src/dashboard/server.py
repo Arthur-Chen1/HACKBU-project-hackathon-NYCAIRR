@@ -2,8 +2,11 @@
 
     GET  /                       the dashboard page
     GET  /api/options            areas, weather sources, preset periods
-    POST /api/run                {start, end, area, mode, weather, minutes} -> {job}
+    POST /api/run                {start, end, area, mode, weather, minutes,
+                                  migration_forecast, migration_issued} -> {job}
                                  area: "midtown" | "pilot" | {"cells": [[row, col], ...]}
+                                 migration_forecast: optional regional birds/km/h for forecast mode,
+                                 issued at migration_issued (NYC local "YYYY-MM-DDTHH:MM")
     GET  /api/job?id=            {state, log, nights: [overview...], error}
     GET  /api/night?id=&night=   buildings and radar cells GeoJSON, scan timeline, overview
 """
@@ -12,7 +15,7 @@ import json
 import threading
 import uuid
 import webbrowser
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +31,14 @@ PRESETS = [
     {"label": "Oct 10, 2021: rained out", "start": "2021-10-10", "end": "2021-10-10"},
     {"label": "Oct 13-14, 2021: medium then heavy", "start": "2021-10-13", "end": "2021-10-14"},
     {"label": "Sep 28-Oct 4, 2021: one week", "start": "2021-09-28", "end": "2021-10-04"},
+    # Forecast demos. The migration values are the study's measured KOKX traffic, used as test data
+    # (a perfect forecast) with an issue time before the cutoff. HRRR supplies the weather.
+    {"label": "Forecast demo: Sep 10, 2021 heavy night (test migration 4,945)", "start": "2021-09-10",
+     "end": "2021-09-10", "mode": "forecast", "migration_forecast": 4945, "migration_issued": "2021-09-10T12:00"},
+    {"label": "Forecast demo: Oct 1, 2021 light night (test migration 298)", "start": "2021-10-01",
+     "end": "2021-10-01", "mode": "forecast", "migration_forecast": 298, "migration_issued": "2021-10-01T12:00"},
+    {"label": "Forecast demo: Sep 10, 2021 with estimated migration", "start": "2021-09-10",
+     "end": "2021-09-10", "mode": "forecast"},
 ]
 _jobs = {}
 _run_lock = threading.Lock()  # One pipeline at a time; radar downloads share a cache.
@@ -57,6 +68,23 @@ def _run(job, params):
         job["state"] = "done"
     except Exception as error:
         job["state"], job["error"] = "error", str(error)
+
+
+def _manual_migration(body, start, end, daily_inputs):
+    """Add a regional migration forecast entered in the dashboard, logged with its issue time."""
+    value = body.get("migration_forecast")
+    if value in (None, ""):
+        return daily_inputs
+    traffic = float(value)
+    if not traffic >= 0:
+        raise ValueError("Migration forecast must be a nonnegative number of birds/km/h")
+    if not body.get("migration_issued"):
+        raise ValueError("Enter when the migration forecast was issued")
+    issued = datetime.fromisoformat(body["migration_issued"])
+    issued = (issued if issued.tzinfo else issued.replace(tzinfo=pipeline.NYC)).astimezone(UTC)
+    entry = {"forecast_migration_birds_per_km_h": traffic, "forecast_migration_issue_utc": issued,
+             "forecast_migration_region": "NYC (entered in dashboard)"}
+    return {**daily_inputs, **{(night, ""): entry for night in pipeline.nights(start, end)}}
 
 
 def _night_payload(result):
@@ -110,7 +138,8 @@ class Handler(BaseHTTPRequestHandler):
                                           "default_area": building_analysis.DEFAULT_AREA,
                                           "weather": ["none", "dryad", "hrrr"], "max_nights": pipeline.MAX_NIGHTS,
                                           "grid": pipeline.grid_info(),
-                                          "today": datetime.now(pipeline.NYC).date()}))
+                                          "today": datetime.now(pipeline.NYC).date(),
+                                          "now_local": datetime.now(pipeline.NYC).strftime("%Y-%m-%dT%H:%M")}))
         job = _jobs.get(query.get("id"))
         if url.path == "/api/job":
             if job is None:
@@ -144,6 +173,8 @@ class Handler(BaseHTTPRequestHandler):
                     or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60)):
                 raise ValueError("Unsupported mode, weather source, or scan interval")
             daily_inputs = pipeline.load_daily_inputs(self.server.daily_inputs) if forecast else None
+            if forecast:
+                daily_inputs = _manual_migration(body, start, end, daily_inputs)
         except (KeyError, TypeError, OSError, ValueError) as error:
             return self._error(400, str(error))
         job_id = uuid.uuid4().hex[:12]

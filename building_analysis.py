@@ -79,7 +79,8 @@ from src.features.model_inputs import forecast_issues, natural_light_features, n
 from src.features.training import write_csv, write_json
 from src.ingest import dryad, hrrr, nyc, usno
 from src.ingest.http import Cache
-from src.models.count import DEFAULT_FORECAST_MODEL, DEFAULT_OBSERVED_MODEL, load_model
+from src.models.count import DEFAULT_OBSERVED_MODEL, load_model
+from src.models.forecast_ai import DEFAULT_FORECAST_MODEL, load_forecast_model
 
 OUTPUT_DIR = Path("data/processed/buildings")
 RAW_DIR = Path("data/raw")
@@ -180,15 +181,33 @@ def attach_migration(buildings, analysis):
     return rows
 
 
+_loaded = {}  # (path, modified time) -> model, so a multi-night period loads each artifact once.
+
+
 def _model(path, mode):
     if path is None:
         path = DEFAULT_FORECAST_MODEL if mode == "forecast" else DEFAULT_OBSERVED_MODEL
         if not path.is_file():
             return None
-    model = load_model(path)
+    path = Path(path)
+    key = (path.resolve(), path.stat().st_mtime_ns)
+    if key not in _loaded:
+        # Forecasts use the gradient-boosted artifact (.joblib); historical replay uses Poisson JSON.
+        _loaded[key] = load_forecast_model(path) if path.suffix == ".joblib" else load_model(path)
+    model = _loaded[key]
     if model.mode != mode:
         raise ValueError(f"Expected a {mode} model at {path}, found {model.mode}")
     return model
+
+
+def model_summary(model):
+    """One line describing the model behind a night's estimates, for the dashboard."""
+    if model is None:
+        return None
+    coverage = model.report.get("labeled_input", {})
+    return (f"{getattr(model, 'basis', f'{model.mode} Poisson model')} trained on "
+            f"{coverage.get('rows', 0):,} surveyed building-nights ({coverage.get('first_night')} to "
+            f"{coverage.get('last_night')})")
 
 
 def _demo_priority(row):
@@ -222,26 +241,33 @@ def _demo_priority(row):
 def score_buildings(rows, model, *, mode):
     """Keep the building-night inputs, score, and actual fitted features in each output row."""
     scored = []
-    for row in rows:
+    # The forecast AI model scores a whole batch at once; the Poisson model scores row by row.
+    batch = model.score_rows(rows) if hasattr(model, "score_rows") else None
+    for index, row in enumerate(rows):
         expected, priority, features = None, "unavailable", ()
-        basis = f"{mode} Poisson model"
+        basis = getattr(model, "basis", f"{mode} Poisson model")
         if model is None and mode == "forecast":
             basis = "forecast demo rules"
             priority, reasons = _demo_priority(row)
         elif model is None:
             reasons = ("Train an observed model with python -m src.models train",)
         else:
-            expected = model.predict(row)
+            if batch is not None:
+                result = batch[index]
+                expected, missing, contributions = result.expected, result.missing, result.contributions
+            else:
+                expected = model.predict(row)
+                missing = model.missing_inputs(row) if expected is None else ()
+                contributions = model.contributions(row) if expected is not None else ()
             if expected is None:
-                missing = model.missing_inputs(row)
                 reasons = ("Missing or unusable inputs: " + ", ".join(missing),) if missing else (
                     "No fitted model is available for these inputs",)
             else:
-                features = tuple(model.features_for(row))
+                features = tuple(result.features if batch is not None else model.features_for(row))
                 priority = ("high" if expected >= HIGH_EXPECTED_COUNT else
                             "medium" if expected >= MEDIUM_EXPECTED_COUNT else "low")
                 reasons = tuple(f"{field.replace('_', ' ')} {'raised' if effect > 0 else 'lowered'} the estimate"
-                                for field, effect in model.contributions(row)[:3] if effect)
+                                for field, effect in contributions[:3] if effect)
         scored.append({**row, "expected_collision_count": expected, "risk_priority": priority,
                        "risk_basis": basis, "risk_features": features,
                        "risk_reasons": (*row.get("source_issues", ()), *reasons)})
@@ -252,6 +278,10 @@ def analyze_forecast(buildings, night, inputs, *, model_path=None, cache=RAW_DIR
     model = _model(model_path, "forecast")
     rows = forecast_rows(buildings, night, inputs, cache, now=now)
     return score_buildings(rows, model, mode="forecast")
+
+
+def forecast_model_summary(model_path=None):
+    return model_summary(_model(model_path, "forecast"))
 
 
 def analyze_replay(buildings, analysis, *, weather="dryad", model_path=None, cache=RAW_DIR):

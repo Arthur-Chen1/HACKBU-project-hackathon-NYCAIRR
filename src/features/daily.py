@@ -10,6 +10,8 @@ from requests import RequestException
 from src.features.model_inputs import number, parse_utc, season_for
 from src.ingest import hrrr, usno
 from src.ingest.http import Cache
+from src.ingest.nyc import NYC_POINT
+from src.models import migration_forecast
 
 MIGRATION_FIELDS = (
     "forecast_migration_birds_per_km_h", "forecast_migration_issue_utc", "forecast_migration_region",
@@ -18,6 +20,7 @@ RADIANCE_FIELDS = (
     "prior_neighborhood_radiance", "prior_radiance_quality", "prior_radiance_available_at_utc",
     "prior_radiance_granule",
 )
+REGION_KEY = "__nyc_reference_point__"  # HRRR sample for the regional migration estimate
 ASTRONOMY_FIELDS = (
     "sunset_utc", "sunrise_utc", "civil_dusk_utc", "civil_dawn_utc",
     "moon_illum_fraction", "moon_above_horizon_minutes",
@@ -77,7 +80,7 @@ def forecast_rows(buildings, night, daily_inputs, cache, *, now=None):
             issues.append("USNO Sun and Moon data unavailable")
         if natural["sunset_utc"] and natural["sunrise_utc"]:
             decision = min(now, natural["sunset_utc"] - timedelta(hours=1))
-            points = {b["bin"]: (b["latitude"], b["longitude"]) for b in buildings}
+            points = {b["bin"]: (b["latitude"], b["longitude"]) for b in buildings} | {REGION_KEY: NYC_POINT}
             try:
                 weather = hrrr.weather_forecast(store, natural["sunset_utc"], natural["sunrise_utc"],
                                                 points, decision_at=decision)
@@ -87,6 +90,16 @@ def forecast_rows(buildings, night, daily_inputs, cache, *, now=None):
         store.session.close()
 
     migration = dict.fromkeys(MIGRATION_FIELDS) | daily_inputs.get((night, ""), {})
+    if migration["forecast_migration_birds_per_km_h"] is None and REGION_KEY in weather:
+        # No issued forecast: estimate regional traffic from tonight's HRRR weather and earlier seasons.
+        try:
+            estimated, reason = migration_forecast.estimate(night, weather[REGION_KEY], decision, cache)
+        except (RequestException, OSError, ValueError) as error:
+            estimated, reason = None, str(error)
+        if estimated:
+            migration = estimated
+        else:
+            issues.append(f"No migration forecast supplied, and no estimate: {reason}")
     return [
         {**building, **natural, **migration, **weather.get(building["bin"], {}),
          **(dict.fromkeys(RADIANCE_FIELDS) | daily_inputs.get((night, building["bin"]), {})),

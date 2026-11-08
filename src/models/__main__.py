@@ -1,4 +1,8 @@
-"""Train and evaluate a collision count model from building-night CSV files."""
+"""Train and evaluate a collision count model from building-night CSV files.
+
+--mode observed fits the Poisson profiles used in historical replay. --mode forecast fits the
+gradient-boosted forecast model (src/models/forecast_ai.py) used for pre-sunset forecasts.
+"""
 
 import argparse
 import csv
@@ -8,7 +12,8 @@ import json
 from pathlib import Path
 
 from src.features.model_inputs import local_night
-from src.models.count import DEFAULT_FORECAST_MODEL, DEFAULT_OBSERVED_MODEL, train
+from src.models.count import DEFAULT_OBSERVED_MODEL, train
+from src.models.forecast_ai import DEFAULT_FORECAST_MODEL, train_forecast
 
 DEFAULT_INPUT = Path("data/processed/baseline.csv")
 
@@ -87,11 +92,15 @@ def main():
         rows, sources = _read_training([args.input, *args.augment])
         if args.sites:
             sources.append(_join_sites(rows, args.sites))
-        model = train(rows, mode=args.mode)
+        model = train(rows) if args.mode == "observed" else train_forecast(rows)
         model.report["sources"] = sources
         model.save(output)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Training failed: {error}\n")
+
+    if args.mode == "forecast":
+        _print_forecast(model, output)
+        return
 
     coverage = model.report["profiles"]["base"]["eligible"]
     print(f"Trained {args.mode} model on {coverage['rows']:,} building-nights across {coverage['nights']:,} nights.")
@@ -104,6 +113,21 @@ def main():
               f"{held_out['base_poisson_same_rows']['mean_absolute_count_error']:.3f} without building traits.")
     else:
         print("No building-level fit: add --sites with a verified crosswalk to learn per-building differences.")
+
+
+def _print_forecast(model, output):
+    base = model.report["profiles"]["base"]["eligible"]
+    print(f"Trained forecast AI model on {base['rows']:,} building-nights across {base['nights']:,} nights.")
+    print(f"Saved model to {output} and its evaluation to {output.with_suffix('.report.json')}")
+    for name, profile in model.report["profiles"].items():
+        if "evaluation" not in profile:
+            print(f"  {name}: skipped ({profile.get('skipped')})")
+            continue
+        for split, scores in profile["evaluation"].items():
+            trees, poisson = scores["gradient_boosting"], scores["poisson_same_features"]
+            print(f"  {name}, {split.replace('_', ' ')}: MAE {trees['mean_absolute_count_error']:.3f} "
+                  f"(Poisson {poisson['mean_absolute_count_error']:.3f}), deviance "
+                  f"{trees['mean_poisson_deviance']:.3f} (Poisson {poisson['mean_poisson_deviance']:.3f})")
 
 
 if __name__ == "__main__":

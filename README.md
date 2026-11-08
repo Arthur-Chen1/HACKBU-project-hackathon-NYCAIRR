@@ -2,7 +2,7 @@
 
 DarkSky Migrations estimates how many bird collisions a morning survey might find at a building. It combines migration traffic, weather, building features, and available light data for each night. NYC building operators can use the resulting priorities and lighting scenarios to plan reductions in eligible lighting. Bright lights can draw nocturnal migrants toward buildings, where they can strike glass. [NYC collision study](https://doi.org/10.1111/1365-2664.14590)
 
-The Python pipeline pulls and caches source data, exports building-night training rows, and fits a collision count model. [Model and implementation guide](MODEL_DESIGN.md)
+The Python pipeline pulls and caches source data, exports building-night training rows, and fits two collision models. A Poisson regression scores historical replays. A gradient-boosted machine-learning model scores pre-sunset forecasts. [Model and implementation guide](MODEL_DESIGN.md)
 
 ## Project layout
 
@@ -66,9 +66,9 @@ Start with `training.csv` and check `coverage.json` before selecting features. T
 
 Run `python main.py` from the project root, or press Run on `main.py` in VS Code with the `.venv` interpreter selected. A local server starts at `http://127.0.0.1:8765/` and opens in the browser. It uses only the standard library, and the map tiles load from OpenStreetMap.
 
-1. Choose **Historical replay** or **Pre-sunset forecast**, then a preset or an inclusive range of NYC nights, up to 31 nights before today.
+1. Choose **Historical replay** or **Pre-sunset forecast**, then a preset or an inclusive range of NYC nights, up to 31 nights before today. In forecast mode, you can type a regional migration forecast in birds/km/h, such as BirdCast's, with its New York issue time. It overrides the daily input file. Leave it blank and the forecast estimates migration from tonight's HRRR weather and past seasons. The **Forecast demo** presets replay 2021 nights with test migration values, so the forecast runs without any input files. The forecast AI model then estimates each building's expected collisions from HRRR weather, that forecast, the date, and the building's height and facade length.
 2. Choose an **area**: a borough (Manhattan by default), a Manhattan neighborhood (Midtown or Lower Manhattan), or **Pick grid cells on map** to click up to 9 cells. Cells are the same ~1.1 km grid as the radar analysis and do not need to touch. Borough loads include only lighting-program buildings (land use 4 or 5).
-3. Press **Analyze buildings**. Each night appears in the table as it finishes. Select a night to see the building map colored by priority, the radar density layer, and the migration timeline. Select a building to see its estimate, priority, recommended action, and reasons.
+3. Press **Analyze buildings**. Each night appears in the table as it finishes. Select a night to see the building map colored by priority, the radar density layer, and the migration timeline. Select a building to see its estimate, priority, rank among tonight's buildings, recommended action, and reasons. By default the map shades buildings by **risk relative to tonight** (top 1%, 5%, 10%, 25%, and the rest), so the riskiest buildings stand out even on a quiet night. Switch **Color buildings by** to **Priority (absolute)** for the high, medium, and low labels, which use fixed thresholds of 1 and 0.25 expected collisions. On a quiet night every building can be low.
 
 For the command line, use `python main.py --cli`. Use `--area` for a borough, `citywide`, `midtown`, or `pilot`. Use `--cells ROW,COL ...` for grid cells, as in `python main.py --cli --start 2021-09-10 --cells 26,21 27,22`. A new replay night downloads about 100 MB of radar, which takes about a minute. Cached nights load in seconds.
 
@@ -137,19 +137,21 @@ The regularized Poisson model estimates the count a comparable survey would find
 
 ## Predict a current night
 
-Train a separate forecast model once you have labeled nights across several dates and sites with data available by the decision cutoff.
+Forecasts use a gradient-boosted tree model (scikit-learn) in place of the regression. No history of issued forecasts joined to survey counts exists yet. It therefore trains on the study's observed migration and LaGuardia weather, treated as perfect forecasts. Train it on the same files as the observed model.
 
 ```sh
 python -m src.models train --mode forecast \
-  --input path/to/labeled-forecast-training.csv \
-  --output data/processed/models/forecast.json
+  --input data/processed/baseline.csv \
+  --augment data/processed/replays/fall-2021/training.csv \
+  --sites data/processed/site_features.csv \
+  --output data/processed/models/forecast.joblib
 
 python main.py --cli --forecast --area pilot \
   --daily-inputs path/to/daily-inputs.csv \
   --operator-settings path/to/operator-settings.csv
 ```
 
-The forecast training CSV needs study IDs, local night dates, survey counts, Sun and Moon fields, a decision timestamp, a regional migration forecast with its issue time, and full HRRR coverage for the required weather fields. Cloud ceiling can be blank when unavailable. Save the daily building-night exports and join completed survey counts by verified BIN and night to build a labeled forecast history. Quality-checked prior neighborhood radiance and verified building attributes can enrich training where available. The saved October 1, 2021 HRRR replay covers one night and lacks an issued migration forecast. Use it to inspect the joins and coverage. [Full field definitions](MODEL_DESIGN.md)
+On held-out study buildings, the model roughly halves the regression's Poisson deviance (4.33 vs 8.79). On held-out future nights, it catches 39% of collisions in each night's top 10%, compared with 27% for the regression. These holdouts contain no forecast error, so treat them as an upper bound. Outside the study buildings' range, such as buildings shorter than 27 m, it extrapolates with the regression's slope. A Lower Manhattan forecast night takes about 4 s with cached weather. Details, metrics, and limits are in [MODEL_RUNBOOK.md](MODEL_RUNBOOK.md#how-the-forecast-ai-model-works). Save the daily building-night exports and join completed survey counts by verified BIN and night to build a real forecast history for retraining.
 
 Forecast mode defaults to tonight in New York. Use `--start` and `--end` for an inclusive range and `--model` to select a different forecast artifact. To use the same input files from the dashboard, launch `python main.py --daily-inputs path/to/daily-inputs.csv --operator-settings path/to/operator-settings.csv` and select forecast mode.
 
@@ -161,7 +163,7 @@ night_date,bin,forecast_migration_birds_per_km_h,forecast_migration_issue_utc,fo
 2026-10-01,1000001,,,,12.5,0,2026-09-30T14:00:00Z,example-granule
 ```
 
-The pipeline fetches USNO astronomy and HRRR weather and uses a cutoff of one hour before sunset or the actual run time if earlier. When a forecast artifact is unavailable, the forecast can show a demo priority from the issued migration and weather, with available light data shown as context. An expected collision count requires a trained forecast model and valid inputs. Model priorities are high at an expected count of 1 or above and medium from 0.25 up to 1. The CLI saves building-night rows and lighting decisions as CSV and GeoJSON under `data/processed/buildings/` and `data/processed/judgements/`.
+The pipeline fetches USNO astronomy and HRRR weather and uses a cutoff of one hour before sunset or the actual run time if earlier. Each building's HRRR values come from its nearest grid cell, found once per run, so weather costs about a second per night for any number of buildings. Without an issued migration forecast, the pipeline estimates regional traffic from tonight's HRRR weather at the NYC reference point and the Dryad seasons before that year. It is usable from March 31 to June 7 and August 30 to November 14, and is less accurate than an issued forecast: a typical night is off by a factor of about 3. It is recalibrated so busy nights can reach high. In 2019–2021 tests it called 17 of 37 high nights high, and 14 of its 42 high calls were quiet nights. With no input files, `python main.py --cli --forecast` therefore still scores tonight in season. When `forecast.joblib` is missing, the forecast shows a demo priority from the issued migration and weather, with available light data shown as context. An expected collision count requires the trained forecast model and valid inputs. Model priorities are high at an expected count of 1 or above and medium from 0.25 up to 1. The CLI saves building-night rows and lighting decisions as CSV and GeoJSON under `data/processed/buildings/` and `data/processed/judgements/`.
 
 ## Set a dimming target
 
@@ -185,4 +187,5 @@ For a building in the lighting program with an available risk priority, the exam
 - [x] Run the dashboard by borough, neighborhood, or selected grid cells.
 - [ ] Add migration × weather interactions, day-of-year terms, and a negative binomial likelihood, as in the study's model.
 - [x] Score daily inputs and calculate scenarios for approved lighting settings.
+- [x] Replace the forecast regression with a gradient-boosted model and sample HRRR for every building in about a second.
 - [ ] Backtest forecast-time scores and measure lighting effects with a pilot.

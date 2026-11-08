@@ -100,13 +100,16 @@ def area_buildings(area, log=print, night=""):
     return spec, buildings
 
 
-def overview(analysis, decisions, weather, *, forecast=False):
+def overview(analysis, decisions, weather, *, forecast=False, model=None):
     n = analysis["night"]
     counts = Counter(d["tier"] for d in decisions)
     priorities = Counter(d["risk_priority"] for d in decisions)
     scored = sum(d["expected_collision_count"] is not None for d in decisions)
-    if forecast:
-        note = "" if scored else "Expected counts unavailable. See each building’s forecast priority and input coverage."
+    if forecast and not model:
+        note = ("No forecast AI model: priorities use demo rules. Train it with "
+                "python -m src.models train --mode forecast to get expected counts.")
+    elif forecast:
+        note = "" if scored else "Expected counts unavailable. See each building’s reasons and input coverage."
     elif n["scans_processed"] == 0:
         note = "No radar scans in the archive for this night"
     elif n["level"] == "unknown":
@@ -131,8 +134,11 @@ def overview(analysis, decisions, weather, *, forecast=False):
         "scans_used": n["scans_used"], "scans_processed": n["scans_processed"],
         "weather": weather,
         "mode": "forecast" if forecast else "observed",
+        "model": model,
         "decision_at_utc": n.get("decision_at_utc"),
         "buildings": len(decisions), "scored_buildings": scored,
+        "max_expected_collision_count": max((d["expected_collision_count"] for d in decisions
+                                             if d["expected_collision_count"] is not None), default=None),
         "priorities": dict(priorities),
         "tiers": {tier: counts[tier] for tier in ("off", "dim", "reduce", "none", "review", "not_in_program")},
         "note": note,
@@ -161,8 +167,12 @@ def run_night(night, area=building_analysis.DEFAULT_AREA, weather="dryad", minut
         covered = sum(bool(row.get("hrrr_expected_hours")) and
                       row["hrrr_expected_hours"] == row.get("hrrr_required_field_hours") for row in rows)
         weather_text = f"HRRR coverage for {covered:,} of {len(rows):,} buildings"
+        if traffic is not None:
+            weather_text += f" · migration forecast {traffic:,.0f} birds/km/h ({first.get('forecast_migration_region')})"
+        model_text = building_analysis.forecast_model_summary(model_path)
     else:
         log(f"{night}: radar")
+        model_text = None
         migration_analysis.fetch(night, minutes)
         analysis = migration_analysis.analyze(night)
         rows = building_analysis.analyze_replay(buildings, analysis, weather=weather, model_path=model_path)
@@ -175,7 +185,7 @@ def run_night(night, area=building_analysis.DEFAULT_AREA, weather="dryad", minut
             weather_text = "not used"
     settings = load_operator_settings(operator_settings, night) if operator_settings else {}
     decisions = lighting_judgement.model_decisions(rows, settings)
-    summary = overview(analysis, decisions, weather_text, forecast=forecast)
+    summary = overview(analysis, decisions, weather_text, forecast=forecast, model=model_text)
     log(f"{night}: {summary['scored_buildings']:,} expected counts for {len(rows):,} building-nights")
     return {"night": night, "area": spec["label"], "overview": summary,
             "decisions": decisions, "rows": rows, "analysis": analysis}

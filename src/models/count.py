@@ -1,4 +1,7 @@
-"""Fit regularized Poisson models to morning-survey collision counts."""
+"""Fit regularized Poisson models to morning-survey collision counts (historical observed mode).
+
+Pre-sunset forecasts use the gradient-boosted model in src/models/forecast_ai.py.
+"""
 
 import json
 from collections import Counter, defaultdict
@@ -12,13 +15,10 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.special import xlogy
 
-from src.features.model_inputs import (
-    forecast_issues, local_night, natural_light_features, number, season_for, usable_radiance,
-)
+from src.features.model_inputs import local_night, natural_light_features, number, season_for, usable_radiance
 from src.features.training import write_json
 
 DEFAULT_OBSERVED_MODEL = Path("data/processed/models/observed.json")
-DEFAULT_FORECAST_MODEL = Path("data/processed/models/forecast.json")
 ARTIFACT_VERSION = 1
 FEATURE_VERSION = 3  # 3: building profiles use a facade-length exposure offset.
 L2 = 0.05
@@ -42,45 +42,32 @@ BASE = {
         "observed_cloud_ceiling_m", "observed_wind_u_m_s", "observed_wind_v_m_s",
         "observed_temperature_c",
     ),
-    "forecast": (
-        "season_fall", "forecast_migration_birds_per_km_h", "forecast_visibility_m",
-        "forecast_wind_u_m_s", "forecast_wind_v_m_s", "forecast_cloud_cover_pct",
-        "forecast_precip_rate_mm_h", *NATURAL,
-    ),
 }
 ENRICHMENTS = {
     "observed": {"natural_light": NATURAL, "footprint": FOOTPRINT,
                  "artificial_light": ("observed_neighborhood_radiance",)},
-    "forecast": {"ceiling": ("forecast_cloud_ceiling_m",), "footprint": FOOTPRINT,
-                 "artificial_light": ("prior_neighborhood_radiance",)},
 }
 LOG_FEATURES = {
-    "observed_migration_birds_per_km_h", "forecast_migration_birds_per_km_h",
-    "observed_neighborhood_radiance", "prior_neighborhood_radiance",
+    "observed_migration_birds_per_km_h", "observed_neighborhood_radiance",
     # Building sizes span orders of magnitude (a 15 m walk-up to a 400 m tower).
     "roof_height_m", "footprint_area_m2",
 }
-SIGNED_FEATURES = {
-    "observed_wind_u_m_s", "observed_wind_v_m_s", "observed_temperature_c",
-    "forecast_wind_u_m_s", "forecast_wind_v_m_s",
-}
+SIGNED_FEATURES = {"observed_wind_u_m_s", "observed_wind_v_m_s", "observed_temperature_c"}
 
 
 def _features(row, mode):
     season = season_for(row)
     features = {"season_fall": int(season == "fall") if season else None}
     features.update(natural_light_features(row))
-    for feature in BASE[mode] + ("forecast_cloud_ceiling_m",):
+    for feature in BASE[mode]:
         if feature not in features:
-            features[feature] = number(row.get(feature), None if feature in SIGNED_FEATURES else 0,
-                                       100 if feature == "forecast_cloud_cover_pct" else None)
+            features[feature] = number(row.get(feature), None if feature in SIGNED_FEATURES else 0)
     matched = row.get("feature_location") == "matched_footprint" and row.get("bin")
     for feature in FOOTPRINT:
         value = number(row.get(feature), 0) if matched else None
         # NYC footprints record an unknown roof height as 0; treat it as missing, not a 0 m building.
         features[feature] = value if value else None
-    radiance = "observed_neighborhood_radiance" if mode == "observed" else "prior_neighborhood_radiance"
-    features[radiance] = usable_radiance(row, mode)
+    features["observed_neighborhood_radiance"] = usable_radiance(row, mode)
     return {name: log1p(value) if value is not None and name in LOG_FEATURES else value
             for name, value in features.items()}
 
@@ -124,8 +111,6 @@ class Model:
     def _inputs(self, row):
         features = _features(row, self.mode)
         missing = [name for name in BASE[self.mode] if features[name] is None]
-        if self.mode == "forecast":
-            missing.extend(forecast_issues(row))
         if not missing and season_for(row) not in self.fits[-1].seasons:
             missing.append("season")
         return features, missing
@@ -230,9 +215,7 @@ def _examples(rows, mode):
         count = number(label, 0)
         if count is None or not count.is_integer():
             raise ValueError(f"Invalid collision count for {site} on {night}")
-        issues = forecast_issues(row) if mode == "forecast" else ()
-        examples.append(Example(night, site, season_for(row), int(count), _features(row, mode), tuple(issues),
-                                exposure(row)))
+        examples.append(Example(night, site, season_for(row), int(count), _features(row, mode), (), exposure(row)))
     return sorted(examples, key=lambda example: (example.night, example.site))
 
 

@@ -5,11 +5,15 @@ from datetime import timedelta
 from math import isfinite
 from statistics import mean
 
-from eccodes import codes_get, codes_grib_find_nearest_multiple, codes_new_from_message, codes_release
+import numpy as np
+from eccodes import codes_get, codes_get_array, codes_get_values, codes_new_from_message, codes_release
 from requests import HTTPError
+from scipy.spatial import cKDTree
 
 ARCHIVE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 HOUR = timedelta(hours=1)
+EARTH_RADIUS_KM = 6371.0
+MAX_SAMPLE_DISTANCE_KM = 10
 FIELDS = {
     ("VIS", "surface"): ("forecast_visibility_m", min),
     ("HGT", "cloud ceiling"): ("forecast_cloud_ceiling_m", min),
@@ -45,23 +49,46 @@ def _field_ranges(index):
             yield field, (start, end)
 
 
-def _nearest(path, points, field):
-    latitudes, longitudes = zip(*points.values())
-    message = codes_new_from_message(path.read_bytes())
-    try:
-        nearest = codes_grib_find_nearest_multiple(message, False, latitudes, [lon % 360 for lon in longitudes])
-        missing = codes_get(message, "missingValue")
-        for key, sample in zip(points, nearest):
-            value = float(sample.value)
-            if isfinite(value) and value != missing and sample.distance < 10:
-                yield key, value * 3600 if field == ("PRATE", "surface") else value
-    finally:
-        codes_release(message)
+def _unit_vectors(latitudes, longitudes):
+    lat, lon = np.radians(latitudes), np.radians(longitudes)
+    return np.c_[np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
+
+
+def _grid_cells(message, points):
+    """Nearest grid index for every point, found once per run because every field shares the grid.
+
+    Returns (keys, indices) for points within MAX_SAMPLE_DISTANCE_KM of a grid point. A KD-tree over
+    the grid points near the request replaces a full-grid search for each point and field.
+    """
+    latitudes, longitudes = (np.array(values, dtype=float) for values in zip(*points.values()))
+    grid_lat = codes_get_array(message, "latitudes")
+    grid_lon = (codes_get_array(message, "longitudes") + 180) % 360 - 180
+    margin = 0.5  # degrees; HRRR's ~3 km spacing puts a grid point well inside this
+    nearby = np.flatnonzero((grid_lat >= latitudes.min() - margin) & (grid_lat <= latitudes.max() + margin)
+                            & (grid_lon >= longitudes.min() - margin) & (grid_lon <= longitudes.max() + margin))
+    if not len(nearby):
+        return [], np.array([], dtype=int)
+    chord, index = cKDTree(_unit_vectors(grid_lat[nearby], grid_lon[nearby])).query(_unit_vectors(latitudes, longitudes))
+    distance_km = 2 * EARTH_RADIUS_KM * np.arcsin(np.minimum(chord / 2, 1))
+    close = distance_km < MAX_SAMPLE_DISTANCE_KM
+    return [key for key, ok in zip(points, close) if ok], nearby[index[close]]
+
+
+def _sample(message, cells, field):
+    """Decode one field once and read the value at every requested grid cell."""
+    keys, indices = cells
+    values = codes_get_values(message)[indices]
+    missing = codes_get(message, "missingValue")
+    scale = 3600 if field == ("PRATE", "surface") else 1  # kg m-2 s-1 to mm/h
+    for key, value in zip(keys, values.tolist()):
+        if isfinite(value) and value != missing:
+            yield key, value * scale
 
 
 def weather_forecast(cache, sunset, sunrise, points, *, decision_at=None):
     decision, run, leads = forecast_hours(sunset, sunrise, decision_at=decision_at)
     samples = defaultdict(lambda: defaultdict(list))
+    cells = None
     for lead in leads:
         if lead > 48:
             break
@@ -74,8 +101,14 @@ def weather_forecast(cache, sunset, sunrise, points, *, decision_at=None):
             raise
         for field, byte_range in _field_ranges(index):
             path = cache.get("hrrr", url, byte_range=byte_range, signature=b"GRIB")
-            for key, value in _nearest(path, points, field):
-                samples[key][field].append(value)
+            message = codes_new_from_message(path.read_bytes())
+            try:
+                if cells is None:
+                    cells = _grid_cells(message, points)
+                for key, value in _sample(message, cells, field):
+                    samples[key][field].append(value)
+            finally:
+                codes_release(message)
 
     result = {}
     for key in points:

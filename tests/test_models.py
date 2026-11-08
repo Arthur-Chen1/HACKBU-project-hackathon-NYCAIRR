@@ -84,27 +84,6 @@ class CountModelTests(TestCase):
             self.assertEqual(fitted.predict(row), model.predict(row))
             self.assertEqual(fitted.features_for(row), model.features_for(row))
 
-    def test_forecast_uses_issued_inputs_and_clears_future_radiance(self):
-        rows = list(training_rows())
-        row = rows[0]
-        model = train(rows, mode="forecast")
-        self.assertIn("prior_neighborhood_radiance", model.features_for(row))
-        self.assertIsNotNone(model.predict(row))
-        retrospective = {**row, "observed_migration_birds_per_km_h": 100000, "observed_visibility_m": 1}
-        self.assertEqual(model.predict(row), model.predict(retrospective))
-        future_light = {**row, "prior_radiance_available_at_utc": row["sunset_utc"]}
-        self.assertNotIn("prior_neighborhood_radiance", model.features_for(future_light))
-        for field, value in (
-            ("forecast_migration_issue_utc", row["sunset_utc"]),
-            ("hrrr_run_utc", row["decision_at_utc"]),
-            ("decision_at_utc", row["sunset_utc"]),
-            ("hrrr_required_field_hours", 11),
-        ):
-            with self.subTest(field=field):
-                changed = {**row, field: value}
-                self.assertIn(field, model.missing_inputs(changed))
-                self.assertIsNone(model.predict(changed))
-
     def test_invalid_training_data_cannot_create_a_model(self):
         rows = list(training_rows())
         with self.assertRaisesRegex(ValueError, "Duplicate study building-night"):
@@ -112,4 +91,4 @@ class CountModelTests(TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid collision count"):
             train([{**rows[0], "observed_collision_count": -1}, *rows[1:]])
         with self.assertRaisesRegex(ValueError, "at least two different nights"):
-            train(rows[:4], mode="forecast")
+            train(rows[:4])
