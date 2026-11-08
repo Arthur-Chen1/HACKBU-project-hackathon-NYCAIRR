@@ -67,6 +67,9 @@ Start with `training.csv` and check `coverage.json` before selecting features. T
 
 ## Use the dashboard
 
+The [bird guide](docs/BIRD_GUIDE.md) explains the selected night's migration and dimming suggestions
+and shares rotating bird facts. Click the bird to toggle its speech bubble; × or Escape closes it.
+
 **Forecast setup:** numeric building estimates require a locally trained
 `data/processed/models/forecast.joblib`. Without it collision and dimming estimates are unavailable.
 See [forecast setup and loading diagnostics](docs/FORECAST_ANALYSIS.md) for training commands,

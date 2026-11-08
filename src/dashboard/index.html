@@ -6,6 +6,7 @@
 <title>DarkSky Migrations</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/bird-guide.css">
 <style>
   :root {
     --bg: #f5f6f8; --panel: #fff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb;
@@ -144,6 +145,22 @@
     </div>
   </div>
 </div>
+<details class="bird-guide" id="birdGuide" open>
+  <summary aria-label="Toggle bird guide" title="Bird guide"><img src="/bird-guide-suit.png" alt="" width="68" height="68"></summary>
+  <div class="bird-guide-bubble">
+    <div class="bird-guide-panel">
+      <button class="bird-guide-close" type="button" id="closeBirdGuide" aria-label="Close bird guide">×</button>
+      <strong class="bird-guide-title">Hey, NYC bird watcher!</strong>
+      <p id="guideNight" aria-live="polite">Pick a night and run an analysis. I’ll explain the migration and suggested dimming.</p>
+      <hr>
+      <h2>NYC bird fact</h2>
+      <p id="guideFact" aria-live="polite"></p>
+      <a id="guideSource" href="https://nycbirdalliance.org/our-work/conservation/project-safe-flight/collision-monitoring">NYC Bird Alliance</a>
+      <button type="button" id="nextBirdFact">Next fact</button>
+    </div>
+  </div>
+</details>
+<script src="/bird-guide.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -348,6 +365,7 @@ async function selectNight(night) {
 }
 
 function renderSummary(o) {
+  window.BirdGuide?.renderNight(o);
   $('nightTitle').textContent = `Night of ${o.night}` + (o.sunset_local ? ` · sunset ${o.sunset_local} to sunrise ${o.sunrise_local}` : '');
   const stat = (value, label) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
   $('stats').innerHTML = [

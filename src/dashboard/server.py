@@ -25,6 +25,11 @@ import main as pipeline
 import migration_analysis
 
 PAGE = Path(__file__).with_name("index.html")
+GUIDE_ASSETS = {
+    "/bird-guide.css": "text/css; charset=utf-8",
+    "/bird-guide.js": "text/javascript; charset=utf-8",
+    "/bird-guide-suit.png": "image/png",
+}
 PRESETS = [
     {"label": "Sep 10, 2021: very heavy migration", "start": "2021-09-10", "end": "2021-09-10"},
     {"label": "Oct 1, 2021: light migration", "start": "2021-10-01", "end": "2021-10-01"},
@@ -141,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == "/":
             return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+        if url.path in GUIDE_ASSETS:
+            return self._send(200, PAGE.with_name(url.path[1:]).read_bytes(), GUIDE_ASSETS[url.path])
         if url.path == "/api/options":
             return self._send(200, _json({"areas": building_analysis.DASHBOARD_AREAS, "presets": PRESETS,
                                           "default_area": building_analysis.DEFAULT_AREA,

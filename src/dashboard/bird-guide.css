@@ -1,0 +1,29 @@
+/* Bird guide imported from the birdtalker dashboard; styles scoped to the widget. */
+  .bird-guide { position: fixed; right: 16px; bottom: 16px; z-index: 1100; }
+  .bird-guide summary { display: block; width: 68px; height: 68px; margin-left: auto;
+    border: 3px solid #fff; border-radius: 16px; background: #fff; cursor: pointer;
+    box-shadow: 0 4px 14px #10182840; }
+  .bird-guide summary::-webkit-details-marker { display: none; }
+  .bird-guide summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .bird-guide img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 13px; }
+  .bird-guide-bubble { position: absolute; right: calc(100% + 14px); bottom: 8px; width: 312px;
+    border: 1px solid #d8bb71; border-radius: 14px; background: #fff8df; box-shadow: 0 8px 28px #10182826; }
+  .bird-guide-bubble::after { content: ''; position: absolute; right: -7px; bottom: 17px; width: 12px; height: 12px;
+    transform: rotate(45deg); border-top: 1px solid #d8bb71; border-right: 1px solid #d8bb71; background: inherit; }
+  .bird-guide-panel { position: relative; padding: 14px; max-height: min(420px, calc(100dvh - 105px)); overflow: auto; }
+  .bird-guide-title { display: block; padding-right: 28px; margin-bottom: 10px; }
+  .bird-guide-panel h2, .bird-guide-panel p { margin: 0 0 8px; }
+  .bird-guide-panel hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+  .bird-guide-panel button { width: auto; padding: 5px 9px; margin: 0 0 0 8px; font-size: 12px; }
+  .bird-guide-panel .bird-guide-close { position: absolute; top: 8px; right: 8px; padding: 0; width: 28px; height: 28px;
+    background: transparent; color: var(--ink); font-size: 19px; }
+  .bird-guide-panel .bird-guide-close:hover { background: #f2e5bd; }
+  .bird-guide-panel a { color: var(--accent); }
+  @media (max-width: 460px) {
+    .bird-guide-bubble { right: 0; bottom: calc(100% + 12px); width: min(312px, calc(100vw - 32px)); }
+    .bird-guide-bubble::after { right: 26px; bottom: -7px; transform: rotate(135deg); }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .bird-guide[open] .bird-guide-bubble { animation: bird-guide-appear 180ms ease-out; }
+    @keyframes bird-guide-appear { from { opacity: 0; transform: translateY(5px); } }
+  }
