@@ -106,7 +106,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if url.path == "/api/options":
-            return self._send(200, _json({"areas": list(building_analysis.AREAS), "presets": PRESETS,
+            return self._send(200, _json({"areas": building_analysis.DASHBOARD_AREAS, "presets": PRESETS,
+                                          "default_area": building_analysis.DEFAULT_AREA,
                                           "weather": ["none", "dryad", "hrrr"], "max_nights": pipeline.MAX_NIGHTS,
                                           "grid": pipeline.grid_info(),
                                           "today": datetime.now(pipeline.NYC).date()}))
@@ -132,10 +133,13 @@ class Handler(BaseHTTPRequestHandler):
             mode = body.get("mode", "observed")
             forecast = mode == "forecast"
             pipeline.validate(start, end, forecast=forecast)
-            area, weather, minutes = body.get("area", "midtown"), body.get("weather", "dryad"), int(body.get("minutes", 60))
+            area = body.get("area", building_analysis.DEFAULT_AREA)
+            weather, minutes = body.get("weather", "dryad"), int(body.get("minutes", 60))
             if isinstance(area, dict):
                 area = area.get("cells") or []
-            pipeline.resolve_area(area)  # Raises ValueError for unknown presets or bad grid cells.
+            elif area not in building_analysis.DASHBOARD_AREAS:  # Citywide is CLI-only (too large to map).
+                raise ValueError(f"Unsupported area {area!r}")
+            pipeline.resolve_area(area)  # Raises ValueError for bad grid cells.
             if (mode not in ("observed", "forecast")
                     or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60)):
                 raise ValueError("Unsupported mode, weather source, or scan interval")

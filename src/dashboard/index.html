@@ -85,8 +85,9 @@
       <div id="gridPanel" hidden>
         <div class="gridbox">
           <div><b id="gridCount">0 cells selected</b> <span class="empty" id="gridArea"></span></div>
-          <div class="hint" style="margin-top:2px">Zoom in, then click cells on the map to add or remove them (up to <span id="gridMax">9</span>; they don't need to touch). Each cell is about 1.1 × 1.1 km, matching the radar grid. Hover to see a cell's ID.</div>
+          <div class="hint" style="margin-top:2px">Zoom in, then click cells on the map to add or remove them (up to <span id="gridMax">9</span>; they don't need to touch). Each cell is about 1.1 × 1.1 km, matching the radar grid. Clicking a building opens its details instead.</div>
           <div id="gridList" class="hint"></div>
+          <div id="gridHover" class="hint" style="color:var(--accent)"></div>
           <button type="button" id="gridClear" class="secondary">Clear selection</button>
         </div>
       </div>
@@ -141,7 +142,10 @@ const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-const map = L.map('map').setView([40.755, -73.985], 14);
+// Keep navigation around the five boroughs while leaving room to inspect individual buildings.
+const nycBounds = L.latLngBounds([40.49, -74.26], [40.92, -73.69]);
+const map = L.map('map', { preferCanvas: true, minZoom: 10, maxBounds: nycBounds, maxBoundsViscosity: 1 })
+  .setView(nycBounds.getCenter(), 10);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, className: 'basemap' }).addTo(map);
 let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null;
@@ -171,12 +175,28 @@ function buildGrid() {
   gridLayer = L.layerGroup();
   for (let r = 0; r < grid.rows; r++) for (let c = 0; c < grid.cols; c++) {
     const key = `${r},${c}`;
-    const rect = L.rectangle(cellBounds(r, c), { renderer: gridRenderer, pane: 'grid', fill: true, ...cellStyle(key) });
-    rect.bindTooltip(`Cell ${key}`, { sticky: true, direction: 'top', opacity: 0.85 });
-    rect.on('click', () => toggleCell(key));
+    // Display only: clicks are handled at the map level (below), so they still work when the
+    // results' canvas layer is drawn on top of the grid.
+    const rect = L.rectangle(cellBounds(r, c), { renderer: gridRenderer, pane: 'grid', interactive: false, ...cellStyle(key) });
     gridRects[key] = rect.addTo(gridLayer);
   }
 }
+
+function cellAt(latlng) {
+  const [west, south] = grid.bounds;
+  const r = Math.floor((latlng.lat - south) / grid.lat_deg), c = Math.floor((latlng.lng - west) / grid.lon_deg);
+  return r >= 0 && r < grid.rows && c >= 0 && c < grid.cols ? `${r},${c}` : null;
+}
+map.on('click', e => {
+  if (!grid || $('area').value !== 'grid') return;
+  const key = cellAt(e.latlng);
+  if (key) toggleCell(key);
+});
+map.on('mousemove', e => {
+  if (!grid || $('area').value !== 'grid') return;
+  const key = cellAt(e.latlng);
+  $('gridHover').textContent = key ? `Pointer over cell ${key}${selection.has(key) ? ' (selected)' : ''}` : '';
+});
 
 function toggleCell(key) {
   if (selection.has(key)) selection.delete(key);
@@ -213,9 +233,21 @@ async function init() {
   grid = options.grid;
   $('gridMax').textContent = grid.max_cells;
   buildGrid();
-  $('area').add(new Option('Pick grid cells on map…', 'grid'));
-  for (const area of options.areas) $('area').add(new Option(area[0].toUpperCase() + area.slice(1), area));
-  $('area').value = 'midtown';
+  const labels = { manhattan: 'Manhattan', bronx: 'The Bronx', brooklyn: 'Brooklyn', queens: 'Queens',
+    'staten-island': 'Staten Island', midtown: 'Midtown', pilot: 'Lower Manhattan' };
+  const boroughs = document.createElement('optgroup');
+  boroughs.label = 'Boroughs';
+  const neighborhoods = document.createElement('optgroup');
+  neighborhoods.label = 'Manhattan neighborhoods';
+  const custom = document.createElement('optgroup');
+  custom.label = 'Custom';
+  custom.append(new Option('Pick grid cells on map…', 'grid'));
+  for (const area of options.areas) {
+    const group = area === 'midtown' || area === 'pilot' ? neighborhoods : boroughs;
+    group.append(new Option(labels[area] ?? area, area));
+  }
+  $('area').append(boroughs, neighborhoods, custom);
+  $('area').value = options.default_area;
   $('area').onchange = setAreaMode;
   options.presets.forEach((p, i) => $('preset').add(new Option(p.label, i)));
   $('preset').onchange = () => {
@@ -313,6 +345,7 @@ function renderMap(data) {
   if ($('showCells').checked) cellLayer.addTo(map);
   buildingLayer = L.geoJSON(data.buildings, {
     style: f => ({ color: '#444', weight: 0.4, fillColor: priorityColor(f.properties.risk_priority), fillOpacity: 0.85 }),
+    bubblingMouseEvents: false,  // A building click shouldn't also toggle the grid cell under it.
     onEachFeature: (f, layer) => layer.on('click', () => renderDetail(f.properties)),
   }).addTo(map);
   if (data.buildings.features.length) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] });

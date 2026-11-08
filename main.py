@@ -5,8 +5,14 @@
     python main.py --cli --start 2021-10-01 --cells 26,21 27,22   # specific ~1.1 km grid cells
     python main.py --cli --forecast --daily-inputs forecast.csv --operator-settings lighting.csv
 
-Areas are a preset name (building_analysis.AREAS) or a list of grid cells [[row, col], ...]. The grid
-is the radar's ~1.1 km grid, so cell (row, col) here is cell (row, col) in migration_analysis.
+    python main.py --cli --start 2021-09-10 --area queens         # a whole borough (program buildings)
+
+Areas are a borough ("manhattan", "bronx", "brooklyn", "queens", "staten-island"), "citywide", a
+neighborhood preset ("midtown", "pilot"), or a list of grid cells [[row, col], ...]. The grid is the
+radar's ~1.1 km grid, so cell (row, col) here is cell (row, col) in migration_analysis.
+
+The first run of a night downloads ~100 MB of NEXRAD radar (about a minute at hourly scans); later
+runs read the cache in data/raw. A borough's first run also downloads its commercial footprints.
 """
 
 import argparse
@@ -53,14 +59,20 @@ def grid_info():
 
 
 def resolve_area(area):
-    """A preset name ("midtown") or grid cells [[row, col], ...] -> {"label", "bounds", "cells"}.
+    """An area name or grid cells [[row, col], ...] -> {"label", "bounds", "cells", "borough", "land_uses"}.
 
-    Cells need not touch. Raises ValueError for unknown presets, too many cells, or cells outside NYC.
+    Names are boroughs, "citywide", or neighborhood presets (building_analysis.REPLAY_AREAS). Borough
+    and citywide areas load only lighting-program buildings, filtered by borough code. Cells need not
+    touch. Raises ValueError for unknown names, too many cells, or cells outside NYC.
     """
     if isinstance(area, str):
-        if area not in building_analysis.AREAS:
+        if area not in building_analysis.REPLAY_AREAS:
             raise ValueError(f"Unknown area {area!r}")
-        return {"label": area, "bounds": tuple(building_analysis.AREAS[area]), "cells": None}
+        borough = building_analysis.BOROUGH_CODES.get(area)
+        large = borough is not None or area == "citywide"
+        return {"label": area, "bounds": tuple(building_analysis.AREAS["citywide" if borough else area]),
+                "cells": None, "borough": borough,
+                "land_uses": building_analysis.LIGHTING_PROGRAM_LAND_USES if large else None}
     grid = grid_info()
     cells = {(int(r), int(c)) for r, c in area}
     if not cells or len(cells) > MAX_CELLS:
@@ -71,15 +83,16 @@ def resolve_area(area):
     bounds = (min(b[0] for b in corners), min(b[1] for b in corners),
               max(b[2] for b in corners), max(b[3] for b in corners))
     label = "grid-" + "_".join(f"{r}x{c}" for r, c in sorted(cells))
-    return {"label": label, "bounds": bounds, "cells": cells}
+    return {"label": label, "bounds": bounds, "cells": cells, "borough": None, "land_uses": None}
 
 
 def area_buildings(area, log=print, night=""):
-    """Buildings for a preset or grid selection, loaded once per bounding box."""
+    """Buildings for an area or grid selection, loaded once per area."""
     spec = resolve_area(area)
     if spec["label"] not in _buildings:
         log(f"{night}: loading {spec['label']} buildings")
-        _buildings[spec["label"]] = building_analysis.load_buildings(spec["bounds"])
+        _buildings[spec["label"]] = building_analysis.load_buildings(
+            spec["bounds"], land_uses=spec["land_uses"], borough=spec["borough"])
     buildings = _buildings[spec["label"]]
     if spec["cells"] is not None:  # The bounding box can include unselected cells; keep only selected ones.
         buildings = [b for b in buildings
@@ -126,7 +139,7 @@ def overview(analysis, decisions, weather, *, forecast=False):
     }
 
 
-def run_night(night, area="pilot", weather="dryad", minutes=60, log=print, *,
+def run_night(night, area=building_analysis.DEFAULT_AREA, weather="dryad", minutes=60, log=print, *,
               forecast=False, daily_inputs=None, operator_settings=None, model_path=None):
     spec, buildings = area_buildings(area, log, night)
     if forecast:
@@ -168,7 +181,7 @@ def run_night(night, area="pilot", weather="dryad", minutes=60, log=print, *,
             "decisions": decisions, "rows": rows, "analysis": analysis}
 
 
-def run_period(start, end, area="pilot", weather="dryad", minutes=60, log=print, **options):
+def run_period(start, end, area=building_analysis.DEFAULT_AREA, weather="dryad", minutes=60, log=print, **options):
     results = []
     for night in nights(start, end):
         try:
@@ -207,7 +220,7 @@ def main():
     parser.add_argument("--cli", action="store_true", help="Print results instead of opening the dashboard")
     parser.add_argument("--start", type=date.fromisoformat, help="First NYC night (forecast defaults to today)")
     parser.add_argument("--end", type=date.fromisoformat, help="Last night, inclusive (default: --start)")
-    parser.add_argument("--area", choices=building_analysis.AREAS, default="midtown")
+    parser.add_argument("--area", choices=building_analysis.REPLAY_AREAS, default=building_analysis.DEFAULT_AREA)
     parser.add_argument("--cells", nargs="+", metavar="ROW,COL",
                         help="Grid cells instead of --area, e.g. --cells 26,21 27,22 (see the dashboard grid)")
     parser.add_argument("--weather", choices=["none", "dryad", "hrrr"], default="dryad", help="Replay weather source")

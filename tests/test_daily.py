@@ -52,7 +52,7 @@ class DailyForecastTests(unittest.TestCase):
                   patch.object(building_analysis, "_model", return_value=None),
                   patch.object(main.migration_analysis, "fetch") as fetch,
                   patch.object(lighting_judgement, "OUTPUT_DIR", folder)):
-                result = main.run_night(NIGHT, forecast=True, daily_inputs=inputs, operator_settings=operator,
+                result = main.run_night(NIGHT, "pilot", forecast=True, daily_inputs=inputs, operator_settings=operator,
                                         log=lambda _: None)
                 csv_path, _ = lighting_judgement.write(result["decisions"], result["rows"], "forecast")
                 fetch.assert_not_called()

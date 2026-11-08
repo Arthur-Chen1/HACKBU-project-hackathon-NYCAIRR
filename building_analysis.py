@@ -84,10 +84,15 @@ OUTPUT_DIR = Path("data/processed/buildings")
 RAW_DIR = Path("data/raw")
 HIGH_EXPECTED_COUNT = 1.0
 MEDIUM_EXPECTED_COUNT = 0.25
+DEFAULT_AREA = "manhattan"
+BOROUGH_CODES = {"manhattan": "1", "bronx": "2", "brooklyn": "3", "queens": "4", "staten-island": "5"}
 AREAS = {
+    "citywide": nyc.CITY_BOUNDS,                        # All five boroughs
     "pilot": nyc.PILOT_BOUNDS,                         # Lower Manhattan, ~1,400 buildings
     "midtown": (-73.995, 40.745, -73.970, 40.765),     # Dense, tall, brightly lit
 }
+DASHBOARD_AREAS = (*BOROUGH_CODES, "midtown", "pilot")
+REPLAY_AREAS = (*DASHBOARD_AREAS, "citywide")
 LAND_USE_LABELS = {
     1: "One & two family", 2: "Multi-family walk-up", 3: "Multi-family elevator",
     4: "Mixed residential & commercial", 5: "Commercial & office", 6: "Industrial & manufacturing",
@@ -117,10 +122,11 @@ def height_class(height_m):
     return next(c.name for c in HEIGHT_CLASSES if height_m >= c.min_m)
 
 
-def load_buildings(bounds=nyc.PILOT_BOUNDS, cache=Path("data/raw")):
+def load_buildings(bounds=nyc.PILOT_BOUNDS, cache=Path("data/raw"), *, land_uses=None, borough=None):
     store = Cache(cache)
     try:
-        features = nyc.buildings(store, bounds, set())
+        features = nyc.buildings(store, bounds, set(), land_uses=land_uses, borough=borough,
+                                 footprint_workers=6 if land_uses is not None and bounds == nyc.CITY_BOUNDS else 1)
     finally:
         store.session.close()
     result = []
@@ -274,7 +280,7 @@ def analyze_replay(buildings, analysis, *, weather="dryad", model_path=None, cac
 
 def prepare(night=None, bounds=nyc.PILOT_BOUNDS, *, program_only=False, fetch=False,
             weather="dryad", model_path=None):
-    buildings = load_buildings(bounds)
+    buildings = load_buildings(bounds, land_uses=LIGHTING_PROGRAM_LAND_USES if program_only else None)
     if program_only:
         buildings = [b for b in buildings if b["in_program"]]
     if night is None:
