@@ -6,11 +6,13 @@
 <title>DarkSky Migrations</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/bird-guide.css">
 <style>
   :root {
     --bg: #f5f6f8; --panel: #fff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb;
-    --accent: #2b59c3; --off: #c0392b; --dim: #e67e22; --reduce: #f1c40f; --none: #b8bec8;
+    --accent: #2b59c3; --error: #c0392b;
     --high: #c0392b; --medium: #e67e22; --low: #2e8b57; --unknown: #7f8c8d;
+    --dimming-high: #bf3434; --dimming-medium: #eaa74c; --dimming-low: #cbd5df; --dimming-unavailable: #edf0f3;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
@@ -31,7 +33,7 @@
   .gridbox { margin-top: 10px; padding: 10px; border: 1px dashed #b9c6e6; border-radius: 8px; background: #f7f9fe; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
   #log { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 130px; overflow: auto; white-space: pre-wrap; }
-  #error { color: var(--off); font-size: 13px; margin-top: 8px; }
+  #error { color: var(--error); font-size: 13px; margin-top: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
@@ -44,7 +46,8 @@
   .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
   .stat > span { font-size: 12px; color: var(--muted); }
   .basemap { filter: grayscale(1) contrast(.85) brightness(1.08); }
-  #note { margin-top: 8px; font-size: 13px; color: var(--dim); }
+  #note { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  #note:empty { display: none; }
   #map { height: 520px; border-radius: 10px; border: 1px solid var(--line); }
   .bottom { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; }
@@ -59,7 +62,7 @@
 <body>
 <header>
   <h1>DarkSky Migrations</h1>
-  <span>Building-night collision estimates and lighting recommendations</span>
+  <span>Collision forecasts and suggested dimming</span>
 </header>
 <div class="layout">
   <div class="side">
@@ -91,6 +94,15 @@
           <button type="button" id="gridClear" class="secondary">Clear selection</button>
         </div>
       </div>
+      <div id="forecastOptions" hidden>
+        <div class="row2">
+          <div><label for="migrationForecast">Migration forecast (birds/km/h)</label>
+            <input type="number" id="migrationForecast" min="0" step="any" placeholder="Automatic estimate"></div>
+          <div><label for="migrationIssued">Issued at (New York time)</label>
+            <input type="datetime-local" id="migrationIssued"></div>
+        </div>
+        <div class="hint">Enter a regional forecast such as BirdCast's, with the time it was issued. It must be issued before the cutoff, one hour before sunset. Leave it blank to use the daily input file or, without one, an estimate from tonight's HRRR weather and past migration seasons.</div>
+      </div>
       <div id="radarOptions"><label for="minutes">Radar scans</label>
         <select id="minutes"><option value="60">Hourly (faster)</option><option value="30">Every 30 min (finer)</option></select></div>
       <button id="run">Analyze buildings</button>
@@ -104,7 +116,7 @@
     <div class="card">
       <h2>Nights in period</h2>
       <table>
-        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">High</th><th class="num">Review</th></tr></thead>
+        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">Top 5%</th><th class="num">Avg. dim</th></tr></thead>
         <tbody id="nights"></tbody>
       </table>
       <div class="hint">Click a night to map it.</div>
@@ -119,14 +131,13 @@
     <div>
       <div id="map"></div>
       <div class="legend">
-        <span><i class="swatch" style="background:var(--high)"></i>High priority</span>
-        <span><i class="swatch" style="background:var(--medium)"></i>Medium priority</span>
-        <span><i class="swatch" style="background:var(--low)"></i>Low priority</span>
-        <span><i class="swatch" style="background:var(--unknown)"></i>Unavailable</span>
+        <b>Suggested dimming</b>
+        <span id="buildingLegend" style="display:contents"></span>
         <span><i class="swatch" style="background:#3b6fd8;opacity:.5"></i>Radar: birds relative to NYC tonight (darker = more)</span>
         <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">
           <input type="checkbox" id="showCells" checked style="width:auto"> Radar layer</label>
       </div>
+      <div class="hint">Darker color means a larger suggested cut: red ≈ top 5%, amber ≈ next 20%, pale ≈ remaining 75%. Ties stay together and may leave fewer red buildings. Percentages are a collision-driven planning guide for nonessential lighting, not a validated lighting target.</div>
     </div>
     <div class="bottom">
       <div class="card"><h2>Migration through the night</h2><div id="timeline" class="empty">Run a period to see the radar timeline.</div></div>
@@ -134,11 +145,35 @@
     </div>
   </div>
 </div>
+<details class="bird-guide" id="birdGuide" open>
+  <summary aria-label="Toggle bird guide" title="Bird guide"><img src="/bird-guide-suit.png" alt="" width="68" height="68"></summary>
+  <div class="bird-guide-bubble">
+    <div class="bird-guide-panel">
+      <button class="bird-guide-close" type="button" id="closeBirdGuide" aria-label="Close bird guide">×</button>
+      <strong class="bird-guide-title">Hey, NYC bird watcher!</strong>
+      <p id="guideNight" aria-live="polite">Pick a night and run an analysis. I’ll explain the migration and suggested dimming.</p>
+      <hr>
+      <h2>NYC bird fact</h2>
+      <p id="guideFact" aria-live="polite"></p>
+      <a id="guideSource" href="https://nycbirdalliance.org/our-work/conservation/project-safe-flight/collision-monitoring">NYC Bird Alliance</a>
+      <button type="button" id="nextBirdFact">Next fact</button>
+    </div>
+  </div>
+</details>
+<script src="/bird-guide.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const priorityColor = p => css('--' + (p === 'unavailable' ? 'unknown' : p));
+const dimmingColor = band => css('--dimming-' + (band || 'unavailable'));
+const DIMMING_LEGEND = [['high', 'Largest cuts · top 5%'], ['medium', 'Next 20%'], ['low', 'Remaining 75%']];
+const buildingColor = p => dimmingColor(p.dimming_band);
+function renderLegend() {
+  const swatch = (color, label) => `<span><i class="swatch" style="background:${color}"></i>${label}</span>`;
+  $('buildingLegend').innerHTML = [...DIMMING_LEGEND.map(([key, label]) => swatch(dimmingColor(key), label)),
+    swatch(dimmingColor('unavailable'), 'Unavailable')].join('');
+}
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
+const dimPct = x => x == null ? '–' : (x > 0 && x < 0.1 ? '<0.1%' : `${fmt(x, 1)}%`);
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -253,16 +288,22 @@ async function init() {
   $('preset').onchange = () => {
     const p = options.presets[$('preset').value];
     if (p) {
-      $('mode').value = 'observed';
+      $('mode').value = p.mode || 'observed';
       updateMode();
       $('start').value = p.start; $('end').value = p.end;
+      $('migrationForecast').value = p.migration_forecast ?? '';
+      if (p.migration_issued) $('migrationIssued').value = p.migration_issued;
     }
   };
   function updateMode() {
     const forecast = $('mode').value === 'forecast';
     $('replayWeather').hidden = $('radarOptions').hidden = forecast;
+    $('forecastOptions').hidden = !forecast;
+    if (forecast && !$('migrationIssued').value) $('migrationIssued').value = options.now_local;
     $('modeHint').textContent = forecast
-      ? 'Uses HRRR weather and the issued migration forecast from the configured daily input file.'
+      ? (options.forecast_model_available
+        ? 'Suggested dimming uses the collision forecast for each building. Loading progress appears below.'
+        : 'Forecast model is not installed. Collision and dimming estimates are unavailable until the forecast setup in README.md is complete.')
       : 'A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.';
   }
   $('mode').onchange = () => {
@@ -280,14 +321,17 @@ $('run').onclick = async () => {
   const picking = $('area').value === 'grid';
   if (picking && !selection.size) { $('error').textContent = 'Click at least one grid cell on the map.'; return; }
   const area = picking ? { cells: [...selection].map(key => key.split(',').map(Number)) } : $('area').value;
+  $('run').disabled = true;
   try {
     const { job: id } = await api('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start: $('start').value, end: $('end').value, area,
-                             mode: $('mode').value, weather: $('weather').value, minutes: Number($('minutes').value) }) });
+                             mode: $('mode').value, weather: $('weather').value, minutes: Number($('minutes').value),
+                             migration_forecast: $('mode').value === 'forecast' ? $('migrationForecast').value : '',
+                             migration_issued: $('migrationIssued').value }) });
     job = id; selected = null; $('run').disabled = true; $('nights').innerHTML = '';
     $('log').classList.remove('empty'); $('log').textContent = 'Starting…';
     clearInterval(poll); poll = setInterval(refresh, 1500); refresh();
-  } catch (e) { $('error').textContent = e.message; }
+  } catch (e) { $('error').textContent = e.message; $('run').disabled = false; }
 };
 
 async function refresh() {
@@ -304,11 +348,11 @@ async function refresh() {
 
 function renderTable(nights) {
   $('nights').innerHTML = nights.map(n => n.error
-    ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--off)">${esc(n.error)}</td></tr>`
+    ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--error)">${esc(n.error)}</td></tr>`
     : `<tr data-night="${n.night}" class="${n.night === selected ? 'selected' : ''}">
         <td>${n.night}</td><td><span class="badge" style="background:${css('--' + n.level)}">${n.level}</span></td>
-        <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.priorities.high || 0)}</td>
-        <td class="num">${fmt(n.tiers.review)}</td></tr>`).join('');
+        <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.dimming_bands.high || 0)}</td>
+        <td class="num">${dimPct(n.mean_suggested_dimming_pct)}</td></tr>`).join('');
   for (const tr of $('nights').querySelectorAll('tr[data-night]')) tr.onclick = () => selectNight(tr.dataset.night);
 }
 
@@ -321,21 +365,23 @@ async function selectNight(night) {
 }
 
 function renderSummary(o) {
+  window.BirdGuide?.renderNight(o);
   $('nightTitle').textContent = `Night of ${o.night}` + (o.sunset_local ? ` · sunset ${o.sunset_local} to sunrise ${o.sunrise_local}` : '');
   const stat = (value, label) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
   $('stats').innerHTML = [
     stat(`<span class="badge" style="background:${css('--' + o.level)};font-size:13px">${o.level}</span>`, 'migration level'),
     stat(fmt(o.traffic_birds_per_km_h), 'birds / km / h (mean)'),
     stat(`${fmt(o.scored_buildings)} / ${fmt(o.buildings)}`, 'building-nights with expected counts'),
-    stat(`${fmt(o.priorities.high || 0)} / ${fmt(o.priorities.medium || 0)} / ${fmt(o.priorities.low || 0)}`, 'high / medium / low priority'),
-    stat(`${fmt(o.tiers.off)} / ${fmt(o.tiers.dim)} / ${fmt(o.tiers.reduce)}`, `off / dim / reduce of ${fmt(o.buildings)}`),
+    stat(dimPct(o.mean_suggested_dimming_pct), 'average suggested dimming'),
+    stat(dimPct(o.max_suggested_dimming_pct), 'largest suggested cut'),
+    stat(fmt(o.dimming_bands.high || 0), 'buildings with the largest cuts · top 5%'),
   ].join('');
-  const context = o.mode === 'observed' ? `${o.scans_used} of ${o.scans_processed} radar scans usable`
-    : (o.decision_at_utc ? `Forecast cutoff ${o.decision_at_utc}` : 'Forecast cutoff unavailable');
-  $('note').textContent = [o.note, o.weather, context].filter(Boolean).join(' · ');
+  // Keep genuine missing-data messages; omit the former model/coverage explanation banner.
+  $('note').textContent = o.note || '';
 }
 
-function renderMap(data) {
+function renderMap(data, refit = true) {
+  renderLegend();
   if (cellLayer) map.removeLayer(cellLayer);
   if (buildingLayer) map.removeLayer(buildingLayer);
   const values = data.cells.features.map(f => f.properties.mean_birds_per_km2);
@@ -344,30 +390,30 @@ function renderMap(data) {
     stroke: false, fillColor: '#3b6fd8', fillOpacity: 0.08 + 0.45 * (f.properties.mean_birds_per_km2 / top) }) });
   if ($('showCells').checked) cellLayer.addTo(map);
   buildingLayer = L.geoJSON(data.buildings, {
-    style: f => ({ color: '#444', weight: 0.4, fillColor: priorityColor(f.properties.risk_priority), fillOpacity: 0.85 }),
+    style: f => ({ color: '#444', weight: 0.4, fillColor: buildingColor(f.properties), fillOpacity: 0.85 }),
     bubblingMouseEvents: false,  // A building click shouldn't also toggle the grid cell under it.
     onEachFeature: (f, layer) => layer.on('click', () => renderDetail(f.properties)),
   }).addTo(map);
-  if (data.buildings.features.length) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] });
+  if (data.buildings.features.length) { if (refit) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] }); }
   else $('note').textContent += ' · No buildings in the lighting program inside this area (water, parks, or residential only).';
 }
+renderLegend();
 $('showCells').onchange = () => cellLayer && ($('showCells').checked ? cellLayer.addTo(map) : map.removeLayer(cellLayer));
 
 function renderDetail(p) {
   $('detail').className = '';
-  const window = p.start_local ? `${p.start_local} to ${p.end_local}` : '';
-  const reduction = p.reduction_pct == null ? '' : ` · ${fmt(p.reduction_pct)}% reduction`;
-  const output = p.projected_artificial_light_output == null ? ''
-    : `<div>Projected light output ${fmt(p.projected_artificial_light_output, 2)} ${esc(p.light_output_unit)}
-       · cap ${fmt(p.target_artificial_light_output, 2)} ${esc(p.light_output_unit)}</div>`;
   $('detail').innerHTML = `
     <div><b>${esc(p.name || 'BIN ' + p.bin)}</b> ${p.name ? `<span class="empty">BIN ${p.bin}</span>` : ''}</div>
     <div class="empty">${esc(p.land_use || 'Unknown use')} · ${fmt(p.height_m)} m${p.year ? ' · built ' + p.year : ''}</div>
-    <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)}</span>
-      <b style="margin-left:6px">${fmt(p.expected_collision_count, 3)} expected collisions</b> · ${esc(p.risk_basis)}</p>
-    <div>${esc(p.action)}${reduction}${window ? ' · ' + esc(window) : ''}</div>
-    ${output}
-    <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;
+    <p style="margin:10px 0 4px"><b style="font-size:22px">${p.suggested_dimming_pct == null ? 'Dimming estimate unavailable' : `Dim by ${dimPct(p.suggested_dimming_pct)}`}</b></p>
+    <div class="empty">Suggested reduction in nonessential light output · planning estimate</div>
+    <div style="margin-top:6px">${fmt(p.expected_collision_count, 3)} predicted collisions per building-night</div>
+    ${p.dimming_rank ? `<div>Rank ${fmt(p.dimming_rank)} of ${fmt(p.dimming_scored_buildings)} dimming estimates in this area tonight</div>` : ''}
+    <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    <details style="margin-top:10px"><summary>About this estimate</summary>
+      <p class="empty">${esc(p.dimming_basis)}. The percentage follows the collision estimate; it does not predict collisions prevented or use a measured ideal light level. Required and emergency lighting are excluded.</p>
+      <div class="empty">Collision model: ${esc(p.risk_basis)}</div>
+    </details>`;
 }
 
 function renderTimeline(scans) {

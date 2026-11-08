@@ -12,12 +12,13 @@ from urllib3.util import Retry
 
 
 class Cache:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, timeout=(15, 90), retries=3):
         self.root = root
+        self.timeout = timeout
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "NYCAIRR-research-ingest/0.1"
         self.session.mount("https://", HTTPAdapter(max_retries=Retry(
-            total=3, backoff_factor=0.75, status_forcelist=(429, 500, 502, 503, 504),
+            total=retries, backoff_factor=0.75, status_forcelist=(429, 500, 502, 503, 504),
             raise_on_status=False,
         )))
 
@@ -37,7 +38,7 @@ class Cache:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        with self.session.get(request_url, headers=headers, timeout=(15, 90), stream=True) as response:
+        with self.session.get(request_url, headers=headers, timeout=self.timeout, stream=True) as response:
             response.raise_for_status()
             if byte_range is not None:
                 content_range = response.headers.get("Content-Range", "")

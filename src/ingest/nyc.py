@@ -31,18 +31,22 @@ def crosswalk(path):
             bin_id = row["bin"].strip()
             if not site or not re.fullmatch(r"[1-5]\d{6}", bin_id):
                 raise ValueError("Crosswalk entries need a study_building_id and a seven-digit NYC BIN")
-            if site in result or bin_id in result.values():
-                raise ValueError("Crosswalk must map each study site to a unique BIN")
+            # Two sites may share a BIN: the study surveyed different facades of one building in
+            # different seasons (1 Hotel Brooklyn Bridge Park is both "l" and "r").
+            if site in result:
+                raise ValueError(f"Crosswalk lists study site {site!r} more than once")
             result[site] = bin_id
     return result
 
 
-def _pages(cache, dataset, columns, where, order):
+def _pages(cache, dataset, columns, where, order, *, log=None):
     for offset in count(step=PAGE_SIZE):
         page = cache.json("nyc", SODA + dataset + ".json", params={
             "$select": columns, "$where": where, "$order": order,
             "$limit": PAGE_SIZE, "$offset": offset,
         })
+        if log:
+            log(f"NYC land use: loaded {offset + len(page):,} lot records")
         yield from page
         if len(page) < PAGE_SIZE:
             break
@@ -52,7 +56,7 @@ def _lot_filter(column, bbls, *, quoted=False, borough=None):
     # PLUTO stores BBL as a number. Building Footprints stores it as text.
     for start in range(0, len(bbls), 300):
         values = bbls[start:start + 300]
-        # Keep the original citywide batches so borough replays can reuse cached downloads.
+        # Ignore batches that cannot contain the requested borough.
         if borough is not None and not values[0][0] <= borough <= values[-1][0]:
             continue
         if quoted:
@@ -60,7 +64,8 @@ def _lot_filter(column, bbls, *, quoted=False, borough=None):
         yield f"{column} in ({','.join(values)})"
 
 
-def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footprint_workers=1):
+def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footprint_workers=1, log=None):
+    log = log or (lambda _: None)
     west, south, east, north = bounds
     ring = f"{west} {south},{east} {south},{east} {north},{west} {north},{west} {south}"
     where = f"intersects(the_geom,'POLYGON (({ring}))')"
@@ -72,7 +77,13 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
     footprint_filters = [where]
     if land_uses is not None:
         codes = ",".join(f"'{code}'" for code in sorted(land_uses))
-        for row in _pages(cache, "64uk-42ks", "bbl,landuse", f"landuse in ({codes})", "bbl"):
+        lot_where = f"landuse in ({codes})"
+        if borough is not None:
+            if borough not in {"1", "2", "3", "4", "5"}:
+                raise ValueError("Expected a borough code from 1 to 5")
+            # BBL is numeric in PLUTO; its leading digit identifies the borough.
+            lot_where += f" AND bbl >= {int(borough) * 10**9} AND bbl < {(int(borough) + 1) * 10**9}"
+        for row in _pages(cache, "64uk-42ks", "bbl,landuse", lot_where, "bbl", log=log):
             bbl = row["bbl"].partition(".")[0]
             if re.fullmatch(r"\d{10}", bbl):
                 land_use[bbl] = row["landuse"]
@@ -82,6 +93,7 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
     parts = defaultdict(list)
     # Field definitions: github.com/CityOfNewYork/nyc-geo-metadata, Metadata_BuildingFootprints.md
     columns = "bin,mappluto_bbl,height_roof,the_geom,objectid,name,feature_code,construction_year,ground_elevation"
+    log(f"NYC footprints: loading {len(footprint_filters):,} batches")
     def collect(footprints):
         for row in footprints:
             bin_id = row.get("bin", "")
@@ -100,8 +112,9 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
                 batch_cache.session.close()
 
         with ThreadPoolExecutor(max_workers=footprint_workers) as pool:
-            for batch in pool.map(fetch_batch, footprint_filters):
+            for completed, batch in enumerate(pool.map(fetch_batch, footprint_filters), 1):
                 collect(batch)
+                log(f"NYC footprints: loaded {completed}/{len(footprint_filters)} batches")
     else:
         for footprint_filter in footprint_filters:
             collect(_pages(cache, "5zhs-2jue", columns, footprint_filter, "objectid"))
@@ -114,6 +127,7 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
                             _pages(cache, "64uk-42ks", "bbl,landuse", lot_filter, "bbl"))
 
     result = {}
+    log(f"Preparing geometry and height for {len(parts):,} buildings")
     for bin_id, rows in parts.items():
         geometry = unary_union([shape(row["the_geom"]) for row in rows])
         point = geometry.representative_point()
@@ -124,6 +138,7 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
         years = [int(row["construction_year"]) for row in rows
                  if str(row.get("construction_year", "")).isdigit() and int(row["construction_year"]) > 0]
         grounds = [float(row["ground_elevation"]) for row in rows if row.get("ground_elevation")]
+        area, perimeter = GEOD.geometry_area_perimeter(orient_polygons(geometry))
         result[bin_id] = {
             "type": "Feature",
             "geometry": mapping(geometry),
@@ -131,7 +146,9 @@ def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footpr
                 "bin": bin_id, "bbl": bbl, "land_use": land_use.get(bbl),
                 "latitude": point.y, "longitude": point.x,
                 "roof_height_m": max(heights) * 0.3048 if heights else None,
-                "footprint_area_m2": GEOD.geometry_area_perimeter(orient_polygons(geometry))[0],
+                "footprint_area_m2": area,
+                # Facade length at street level; the collision model uses it as exposure.
+                "footprint_perimeter_m": perimeter,
                 "name": next((row["name"].strip() for row in rows if row.get("name", "").strip()), None),
                 # 2100 = building; others are parking, tanks, placeholders, skybridges, etc.
                 "feature_code": 2100 if 2100 in codes else min(codes) if codes else None,

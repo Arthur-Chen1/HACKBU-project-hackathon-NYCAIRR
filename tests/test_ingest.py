@@ -110,6 +110,20 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(set(features), {f"{borough}000001" for borough in range(1, 6)})
         self.assertTrue(all(feature["properties"]["land_use"] == "5" for feature in features.values()))
 
+    def test_borough_load_filters_lots_before_downloading_citywide_records(self):
+        queries = []
+
+        class Socrata:
+            def json(self, source, url, *, params):
+                queries.append(params["$where"])
+                if url.endswith("64uk-42ks.json"):
+                    return [{"bbl": "1000010001.0", "landuse": "5"}]
+                return []
+
+        buildings(Socrata(), CITY_BOUNDS, set(), land_uses={4, 5}, borough="1")
+        self.assertEqual(queries[0], "landuse in ('4','5') AND bbl >= 1000000000 AND bbl < 2000000000")
+        self.assertIn("mappluto_bbl in ('1000010001')", queries[1])
+
     def test_black_marble_respects_grid_orientation_and_quality(self):
         with TemporaryDirectory() as temp:
             path = Path(temp) / "test.h5"

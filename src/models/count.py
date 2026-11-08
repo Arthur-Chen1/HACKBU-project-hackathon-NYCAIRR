@@ -1,4 +1,7 @@
-"""Fit regularized Poisson models to morning-survey collision counts."""
+"""Fit regularized Poisson models to morning-survey collision counts (historical observed mode).
+
+Pre-sunset forecasts use the gradient-boosted model in src/models/forecast_ai.py.
+"""
 
 import json
 from collections import Counter, defaultdict
@@ -12,20 +15,26 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.special import xlogy
 
-from src.features.model_inputs import (
-    forecast_issues, local_night, natural_light_features, number, season_for, usable_radiance,
-)
+from src.features.model_inputs import local_night, natural_light_features, number, season_for, usable_radiance
 from src.features.training import write_json
 
 DEFAULT_OBSERVED_MODEL = Path("data/processed/models/observed.json")
-DEFAULT_FORECAST_MODEL = Path("data/processed/models/forecast.json")
 ARTIFACT_VERSION = 1
-FEATURE_VERSION = 1
+FEATURE_VERSION = 3  # 3: building profiles use a facade-length exposure offset.
 L2 = 0.05
 TEST_FRACTION = 0.2
 ALERT_FRACTION = 0.1
 MIN_RATE = 1e-9
+# Building profiles model collisions per 100 m of facade. Training uses the facade length surveyed
+# (Table S2); scoring uses the building's footprint perimeter. Expected count:
+#   lambda = (facade_m / 100) * exp(intercept + sum(coefficient * standardized feature))
+EXPOSURE_UNIT_M = 100.0
 NATURAL = ("night_hours", "potential_moonlit_hours")
+# Building traits. Training rows get them from a verified study-site-to-BIN crosswalk (see
+# `python -m src.ingest sites`); scoring rows get them from each building's own footprint, so this
+# profile is what makes estimates differ between individual buildings on the same night.
+# Construction year is left out: it is missing for several study sites, and footprints sometimes
+# carry a lot's original year for newer buildings.
 FOOTPRINT = ("roof_height_m", "footprint_area_m2")
 BASE = {
     "observed": (
@@ -33,43 +42,45 @@ BASE = {
         "observed_cloud_ceiling_m", "observed_wind_u_m_s", "observed_wind_v_m_s",
         "observed_temperature_c",
     ),
-    "forecast": (
-        "season_fall", "forecast_migration_birds_per_km_h", "forecast_visibility_m",
-        "forecast_wind_u_m_s", "forecast_wind_v_m_s", "forecast_cloud_cover_pct",
-        "forecast_precip_rate_mm_h", *NATURAL,
-    ),
 }
 ENRICHMENTS = {
     "observed": {"natural_light": NATURAL, "footprint": FOOTPRINT,
                  "artificial_light": ("observed_neighborhood_radiance",)},
-    "forecast": {"ceiling": ("forecast_cloud_ceiling_m",), "footprint": FOOTPRINT,
-                 "artificial_light": ("prior_neighborhood_radiance",)},
 }
 LOG_FEATURES = {
-    "observed_migration_birds_per_km_h", "forecast_migration_birds_per_km_h",
-    "observed_neighborhood_radiance", "prior_neighborhood_radiance",
+    "observed_migration_birds_per_km_h", "observed_neighborhood_radiance",
+    # Building sizes span orders of magnitude (a 15 m walk-up to a 400 m tower).
+    "roof_height_m", "footprint_area_m2",
 }
-SIGNED_FEATURES = {
-    "observed_wind_u_m_s", "observed_wind_v_m_s", "observed_temperature_c",
-    "forecast_wind_u_m_s", "forecast_wind_v_m_s",
-}
+SIGNED_FEATURES = {"observed_wind_u_m_s", "observed_wind_v_m_s", "observed_temperature_c"}
 
 
 def _features(row, mode):
     season = season_for(row)
     features = {"season_fall": int(season == "fall") if season else None}
     features.update(natural_light_features(row))
-    for feature in BASE[mode] + ("forecast_cloud_ceiling_m",):
+    for feature in BASE[mode]:
         if feature not in features:
-            features[feature] = number(row.get(feature), None if feature in SIGNED_FEATURES else 0,
-                                       100 if feature == "forecast_cloud_cover_pct" else None)
+            features[feature] = number(row.get(feature), None if feature in SIGNED_FEATURES else 0)
     matched = row.get("feature_location") == "matched_footprint" and row.get("bin")
     for feature in FOOTPRINT:
-        features[feature] = number(row.get(feature), 0) if matched else None
-    radiance = "observed_neighborhood_radiance" if mode == "observed" else "prior_neighborhood_radiance"
-    features[radiance] = usable_radiance(row, mode)
+        value = number(row.get(feature), 0) if matched else None
+        # NYC footprints record an unknown roof height as 0; treat it as missing, not a 0 m building.
+        features[feature] = value if value else None
+    features["observed_neighborhood_radiance"] = usable_radiance(row, mode)
     return {name: log1p(value) if value is not None and name in LOG_FEATURES else value
             for name, value in features.items()}
+
+
+def exposure(row):
+    """Facade length in 100 m units: surveyed length for study sites, perimeter for candidate buildings."""
+    if row.get("feature_location") != "matched_footprint" or not row.get("bin"):
+        return None
+    for field in ("surveyed_facade_m", "footprint_perimeter_m"):
+        value = number(row.get(field), 0)
+        if value:
+            return value / EXPOSURE_UNIT_M
+    return None
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,7 @@ class PoissonFit:
     scales: tuple
     coefficients: tuple
     intercept: float
+    exposure_offset: bool = False
 
     def effects(self, features):
         return [(features[name] - mean) / scale * coef
@@ -99,8 +111,6 @@ class Model:
     def _inputs(self, row):
         features = _features(row, self.mode)
         missing = [name for name in BASE[self.mode] if features[name] is None]
-        if self.mode == "forecast":
-            missing.extend(forecast_issues(row))
         if not missing and season_for(row) not in self.fits[-1].seasons:
             missing.append("season")
         return features, missing
@@ -113,8 +123,12 @@ class Model:
         if missing:
             return None, features
         season = season_for(row)
+        facade = exposure(row)
         fit = next(fit for fit in self.fits if season in fit.seasons
-                   and all(features[name] is not None for name in fit.feature_names))
+                   and all(features[name] is not None for name in fit.feature_names)
+                   and (facade or not fit.exposure_offset))
+        if fit.exposure_offset:
+            features = {**features, "facade_length_per_100m": facade}
         return fit, features
 
     def features_for(self, row):
@@ -125,13 +139,18 @@ class Model:
         fit, features = self._fit_for(row)
         if fit is None:
             return []
-        return sorted(zip(fit.feature_names, fit.effects(features)), key=lambda pair: -abs(pair[1]))
+        effects = list(zip(fit.feature_names, fit.effects(features)))
+        if fit.exposure_offset:
+            effects.append(("facade_length_per_100m", log(features["facade_length_per_100m"])))
+        return sorted(effects, key=lambda pair: -abs(pair[1]))
 
     def predict(self, row):
         fit, features = self._fit_for(row)
         if fit is None:
             return None
         log_rate = fit.intercept + sum(fit.effects(features))
+        if fit.exposure_offset:
+            log_rate += log(features["facade_length_per_100m"])
         if not isfinite(log_rate) or log_rate > 700:
             return None
         return exp(log_rate)
@@ -152,7 +171,7 @@ def load_model(path):
         raise ValueError("Unsupported collision model mode")
     fits = tuple(PoissonFit(
         tuple(fit["feature_names"]), tuple(fit["seasons"]), tuple(fit["means"]),
-        tuple(fit["scales"]), tuple(fit["coefficients"]), fit["intercept"],
+        tuple(fit["scales"]), tuple(fit["coefficients"]), fit["intercept"], bool(fit.get("exposure_offset", False)),
     ) for fit in data["fits"])
     allowed = {*BASE[mode], *(feature for group in ENRICHMENTS[mode].values() for feature in group)}
     if not fits or fits[-1].feature_names != BASE[mode] or any(
@@ -176,6 +195,7 @@ class Example:
     count: int
     features: dict
     availability_issues: tuple
+    exposure: float | None = None
 
 
 def _examples(rows, mode):
@@ -195,8 +215,7 @@ def _examples(rows, mode):
         count = number(label, 0)
         if count is None or not count.is_integer():
             raise ValueError(f"Invalid collision count for {site} on {night}")
-        issues = forecast_issues(row) if mode == "forecast" else ()
-        examples.append(Example(night, site, season_for(row), int(count), _features(row, mode), tuple(issues)))
+        examples.append(Example(night, site, season_for(row), int(count), _features(row, mode), (), exposure(row)))
     return sorted(examples, key=lambda example: (example.night, example.site))
 
 
@@ -204,9 +223,18 @@ def _matrix(rows, feature_names):
     return np.array([[row.features[name] for name in feature_names] for row in rows], dtype=float)
 
 
-def _fit(rows, feature_names):
+def _offsets(rows, use_exposure):
+    return np.array([log(row.exposure) if use_exposure else 0.0 for row in rows])
+
+
+def _log_rate(fit, row):
+    return fit.intercept + sum(fit.effects(row.features)) + (log(row.exposure) if fit.exposure_offset else 0.0)
+
+
+def _fit(rows, feature_names, use_exposure=False):
     features = _matrix(rows, feature_names)
     counts = np.array([row.count for row in rows], dtype=float)
+    offsets = _offsets(rows, use_exposure)
     means = features.mean(axis=0)
     scales = features.std(axis=0)
     constant = np.ptp(features, axis=0) == 0
@@ -214,11 +242,11 @@ def _fit(rows, feature_names):
     scales[constant] = 1
     matrix = (features - means) / scales
     initial = np.zeros(len(feature_names) + 1)
-    initial[0] = log(max(counts.mean(), MIN_RATE))
+    initial[0] = log(max(counts.sum() / np.exp(offsets).sum(), MIN_RATE))
 
     def objective(params):
         coeffs = params[1:]
-        linear = params[0] + matrix @ coeffs
+        linear = params[0] + matrix @ coeffs + offsets
         if linear.max() > 500:
             return np.inf, np.zeros_like(params)
         expected = np.exp(linear)
@@ -235,7 +263,7 @@ def _fit(rows, feature_names):
     else:
         intercept, *coefficients = initial.tolist()
     return PoissonFit(feature_names, tuple(sorted({row.season for row in rows})), tuple(means.tolist()),
-                      tuple(scales.tolist()), tuple(coefficients), intercept)
+                      tuple(scales.tolist()), tuple(coefficients), intercept, use_exposure)
 
 
 def _metrics(rows, expected):
@@ -264,7 +292,7 @@ def _summary(rows):
     }
 
 
-def _evaluate(rows, features, base):
+def _evaluate(rows, features, base, use_exposure=False):
     nights = sorted({row.night for row in rows})
     sites = sorted({row.site for row in rows})
     future = set(nights[-ceil(TEST_FRACTION * len(nights)):])
@@ -283,8 +311,8 @@ def _evaluate(rows, features, base):
         for label, columns in (("poisson", features), ("base_poisson_same_rows", base)):
             if label == "base_poisson_same_rows" and columns == features:
                 continue
-            fit = _fit(train, columns)
-            scores[label] = _metrics(test, [exp(fit.intercept + sum(fit.effects(row.features))) for row in test])
+            fit = _fit(train, columns, use_exposure and label == "poisson")
+            scores[label] = _metrics(test, [exp(_log_rate(fit, row)) for row in test])
         output[name] = scores
     return output
 
@@ -318,8 +346,10 @@ def train(rows, mode="observed"):
     for size in range(len(enrichments) + 1):
         for groups in combinations(enrichments, size):
             features = base + tuple(feature for group in groups for feature in enrichments[group])
+            use_exposure = "footprint" in groups
             eligible = [row for row in examples if not row.availability_issues
-                        and all(row.features[name] is not None for name in features)]
+                        and all(row.features[name] is not None for name in features)
+                        and (row.exposure or not use_exposure)]
             name = "+".join(groups) or "base"
             profile = report["profiles"][name] = {
                 "features": features, "eligible": _summary(eligible),
@@ -331,7 +361,8 @@ def train(rows, mode="observed"):
                     raise ValueError(f"{mode} model cannot be trained. {reason}; found {len(eligible)} eligible rows.")
                 profile["skipped"] = reason
                 continue
-            profile["evaluation"] = _evaluate(eligible, features, base)
-            fits.append(_fit(eligible, features))
+            profile["exposure_offset"] = use_exposure
+            profile["evaluation"] = _evaluate(eligible, features, base, use_exposure)
+            fits.append(_fit(eligible, features, use_exposure))
     fits.sort(key=lambda fit: -len(fit.feature_names))
     return Model(mode, tuple(fits), report)
