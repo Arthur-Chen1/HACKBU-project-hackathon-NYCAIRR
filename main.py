@@ -2,7 +2,11 @@
 
     python main.py
     python main.py --cli --start 2021-10-01 --area pilot
+    python main.py --cli --start 2021-10-01 --cells 26,21 27,22   # specific ~1.1 km grid cells
     python main.py --cli --forecast --daily-inputs forecast.csv --operator-settings lighting.csv
+
+Areas are a preset name (building_analysis.AREAS) or a list of grid cells [[row, col], ...]. The grid
+is the radar's ~1.1 km grid, so cell (row, col) here is cell (row, col) in migration_analysis.
 """
 
 import argparse
@@ -10,6 +14,7 @@ import os
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
+from math import ceil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -23,16 +28,63 @@ try:
     from src.features.daily import load_daily_inputs
     from src.features.model_inputs import NYC, parse_utc
     from src.recommendations.dimming import load_operator_settings
+    from src.features import birds
+    from src.ingest.nyc import CITY_BOUNDS
 except ImportError as error:
     sys.exit(f"Missing dependency ({error.name}). Install them with:\n"
              "  python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt")
 
 MAX_NIGHTS = 31
-_buildings = {}  # Area -> buildings, so a multi-night period loads footprints once.
+MAX_CELLS = 9  # Dense Manhattan cells hold 1,000-2,000 buildings each.
+GRID_BOUNDS = CITY_BOUNDS  # Same ~1.1 km grid as the radar cells in migration_analysis.
+_buildings = {}  # Area label -> buildings, so a multi-night period loads footprints once.
 
 
 def nights(start, end):
     return [start + timedelta(days=i) for i in range((end - start).days + 1)]
+
+
+def grid_info():
+    """The NYC selection grid: {"bounds", "lat_deg", "lon_deg", "rows", "cols", "max_cells"}."""
+    west, south, east, north = GRID_BOUNDS
+    return {"bounds": GRID_BOUNDS, "lat_deg": birds.GRID_LAT_DEG, "lon_deg": birds.GRID_LON_DEG,
+            "rows": ceil((north - south) / birds.GRID_LAT_DEG), "cols": ceil((east - west) / birds.GRID_LON_DEG),
+            "max_cells": MAX_CELLS}
+
+
+def resolve_area(area):
+    """A preset name ("midtown") or grid cells [[row, col], ...] -> {"label", "bounds", "cells"}.
+
+    Cells need not touch. Raises ValueError for unknown presets, too many cells, or cells outside NYC.
+    """
+    if isinstance(area, str):
+        if area not in building_analysis.AREAS:
+            raise ValueError(f"Unknown area {area!r}")
+        return {"label": area, "bounds": tuple(building_analysis.AREAS[area]), "cells": None}
+    grid = grid_info()
+    cells = {(int(r), int(c)) for r, c in area}
+    if not cells or len(cells) > MAX_CELLS:
+        raise ValueError(f"Select between 1 and {MAX_CELLS} grid cells")
+    if any(not (0 <= r < grid["rows"] and 0 <= c < grid["cols"]) for r, c in cells):
+        raise ValueError("Grid cell outside NYC")
+    corners = [birds.cell_bounds(r, c, GRID_BOUNDS) for r, c in cells]
+    bounds = (min(b[0] for b in corners), min(b[1] for b in corners),
+              max(b[2] for b in corners), max(b[3] for b in corners))
+    label = "grid-" + "_".join(f"{r}x{c}" for r, c in sorted(cells))
+    return {"label": label, "bounds": bounds, "cells": cells}
+
+
+def area_buildings(area, log=print, night=""):
+    """Buildings for a preset or grid selection, loaded once per bounding box."""
+    spec = resolve_area(area)
+    if spec["label"] not in _buildings:
+        log(f"{night}: loading {spec['label']} buildings")
+        _buildings[spec["label"]] = building_analysis.load_buildings(spec["bounds"])
+    buildings = _buildings[spec["label"]]
+    if spec["cells"] is not None:  # The bounding box can include unselected cells; keep only selected ones.
+        buildings = [b for b in buildings
+                     if birds.cell_index(b["latitude"], b["longitude"], GRID_BOUNDS) in spec["cells"]]
+    return spec, buildings
 
 
 def overview(analysis, decisions, weather, *, forecast=False):
@@ -76,10 +128,7 @@ def overview(analysis, decisions, weather, *, forecast=False):
 
 def run_night(night, area="pilot", weather="dryad", minutes=60, log=print, *,
               forecast=False, daily_inputs=None, operator_settings=None, model_path=None):
-    if area not in _buildings:
-        log(f"{night}: loading {area} buildings")
-        _buildings[area] = building_analysis.load_buildings(building_analysis.AREAS[area])
-    buildings = _buildings[area]
+    spec, buildings = area_buildings(area, log, night)
     if forecast:
         log(f"{night}: Sun, Moon and HRRR forecast")
         rows = building_analysis.analyze_forecast(buildings, night, daily_inputs or {}, model_path=model_path)
@@ -115,7 +164,7 @@ def run_night(night, area="pilot", weather="dryad", minutes=60, log=print, *,
     decisions = lighting_judgement.model_decisions(rows, settings)
     summary = overview(analysis, decisions, weather_text, forecast=forecast)
     log(f"{night}: {summary['scored_buildings']:,} expected counts for {len(rows):,} building-nights")
-    return {"night": night, "overview": summary,
+    return {"night": night, "area": spec["label"], "overview": summary,
             "decisions": decisions, "rows": rows, "analysis": analysis}
 
 
@@ -159,6 +208,8 @@ def main():
     parser.add_argument("--start", type=date.fromisoformat, help="First NYC night (forecast defaults to today)")
     parser.add_argument("--end", type=date.fromisoformat, help="Last night, inclusive (default: --start)")
     parser.add_argument("--area", choices=building_analysis.AREAS, default="midtown")
+    parser.add_argument("--cells", nargs="+", metavar="ROW,COL",
+                        help="Grid cells instead of --area, e.g. --cells 26,21 27,22 (see the dashboard grid)")
     parser.add_argument("--weather", choices=["none", "dryad", "hrrr"], default="dryad", help="Replay weather source")
     parser.add_argument("--forecast", action="store_true", help="Use pre-sunset forecasts with no radar observations")
     parser.add_argument("--daily-inputs", type=Path, help="Issued migration forecasts and optional prior radiance CSV")
@@ -178,16 +229,18 @@ def main():
     end = args.end or start
     try:
         validate(start, end, forecast=args.forecast)
+        area = [cell.split(",") for cell in args.cells] if args.cells else args.area
+        resolve_area(area)
         daily_inputs = load_daily_inputs(args.daily_inputs) if args.forecast else None
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    results = run_period(start, end, args.area, args.weather, args.minutes, forecast=args.forecast,
+    results = run_period(start, end, area, args.weather, args.minutes, forecast=args.forecast,
                          daily_inputs=daily_inputs, operator_settings=args.operator_settings, model_path=args.model)
     _print_table(results)
     for result in results:
         if "error" not in result:
             suffix = "_forecast" if args.forecast else ""
-            name = f"{result['night']}_{args.area}{suffix}"
+            name = f"{result['night']}_{result['area']}{suffix}"
             rows_path, _ = building_analysis.write(result["rows"], name)
             decisions_path, _ = lighting_judgement.write(result["decisions"], result["rows"], name)
             print(f"Saved {rows_path} and {decisions_path}")
