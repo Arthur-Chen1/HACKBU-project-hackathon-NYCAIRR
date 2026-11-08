@@ -51,6 +51,35 @@
   #detail ul { margin: 8px 0 0; padding-left: 18px; }
   #detail li { margin: 3px 0; }
   .empty { color: var(--muted); font-size: 13px; }
+  .bird-guide { position: fixed; right: 16px; bottom: 16px; z-index: 1100; }
+  .bird-guide summary { display: block; width: 68px; height: 68px; margin-left: auto;
+    border: 3px solid #fff; border-radius: 16px; background: #fff; cursor: pointer;
+    box-shadow: 0 4px 14px #10182840; }
+  .bird-guide summary::-webkit-details-marker { display: none; }
+  .bird-guide summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .bird-guide img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 13px; }
+  .bird-guide-bubble { position: absolute; right: calc(100% + 14px); bottom: 8px; width: 312px;
+    border: 1px solid #d8bb71; border-radius: 14px; background: #fff8df; box-shadow: 0 8px 28px #10182826; }
+  .bird-guide-bubble::after { content: ''; position: absolute; right: -7px; bottom: 17px; width: 12px; height: 12px;
+    transform: rotate(45deg); border-top: 1px solid #d8bb71; border-right: 1px solid #d8bb71; background: inherit; }
+  .bird-guide-panel { position: relative; padding: 14px; max-height: min(420px, calc(100dvh - 105px)); overflow: auto; }
+  .bird-guide-title { display: block; padding-right: 28px; margin-bottom: 10px; }
+  .bird-guide-panel h2, .bird-guide-panel p { margin: 0 0 8px; }
+  .bird-guide-panel hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+  .bird-guide-panel button { width: auto; padding: 5px 9px; margin: 0 0 0 8px; font-size: 12px; }
+  .bird-guide-panel .bird-guide-close { position: absolute; top: 8px; right: 8px; padding: 0; width: 28px; height: 28px;
+    background: transparent; color: var(--ink); font-size: 19px; }
+  .bird-guide-panel .bird-guide-close:hover { background: #f2e5bd; }
+  .bird-guide-panel a { color: var(--accent); }
+  body { padding-bottom: 84px; }
+  @media (max-width: 460px) {
+    .bird-guide-bubble { right: 0; bottom: calc(100% + 12px); width: min(312px, calc(100vw - 32px)); }
+    .bird-guide-bubble::after { right: 26px; bottom: -7px; transform: rotate(135deg); }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .bird-guide[open] .bird-guide-bubble { animation: bird-guide-appear 180ms ease-out; }
+    @keyframes bird-guide-appear { from { opacity: 0; transform: translateY(5px); } }
+  }
   @media (max-width: 980px) { .layout, .bottom { grid-template-columns: 1fr; } #map { height: 420px; } }
 </style>
 </head>
@@ -121,6 +150,21 @@
     </div>
   </div>
 </div>
+<details class="bird-guide" id="birdGuide" open>
+  <summary aria-label="Toggle bird guide" title="Bird guide"><img src="/bird-guide-suit.png" alt=""></summary>
+  <div class="bird-guide-bubble">
+    <div class="bird-guide-panel">
+      <button class="bird-guide-close" type="button" id="closeBirdGuide" aria-label="Close bird guide">×</button>
+      <strong class="bird-guide-title">Hey, NYC bird watcher!</strong>
+      <p id="guideNight" aria-live="polite">Pick a night and run a replay. I’ll explain what the radar picked up.</p>
+      <hr>
+      <h2>NYC bird fact</h2>
+      <p id="guideFact" aria-live="polite"></p>
+      <a id="guideSource" href="https://nycbirdalliance.org/our-work/conservation/project-safe-flight/collision-monitoring">NYC Bird Alliance</a>
+      <button type="button" id="nextBirdFact">Next fact</button>
+    </div>
+  </div>
+</details>
 <script>
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -128,6 +172,46 @@ const TIER = Object.fromEntries(['off', 'dim', 'reduce', 'none'].map(tier => [ti
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const birdFacts = [
+  ['White-throated Sparrows are the birds NYC Bird Alliance volunteers most often find after window collisions.',
+    'NYC Bird Alliance', 'https://nycbirdalliance.org/our-work/conservation/project-safe-flight/collision-monitoring'],
+  ['Peregrine Falcons breed in the NYC area. Bridges and tall buildings can serve as nesting sites.',
+    'NYS DEC', 'https://extapps.dec.ny.gov/fs/programs/dfw/SWAP2025/Birds/Peregrine%20falcon.pdf'],
+  ['The Common Yellowthroat passes through NYC during migration and also breeds in some of the city’s wilder places.',
+    'NYC Bird Alliance', 'https://nycbirdalliance.org/our-work/conservation/project-safe-flight'],
+];
+let birdFactIndex = 0;
+function showBirdFact() {
+  const [fact, source, url] = birdFacts[birdFactIndex];
+  $('guideFact').textContent = fact;
+  $('guideSource').textContent = source;
+  $('guideSource').href = url;
+}
+showBirdFact();
+$('nextBirdFact').onclick = () => {
+  birdFactIndex = (birdFactIndex + 1) % birdFacts.length;
+  showBirdFact();
+};
+function closeBirdGuide() {
+  $('birdGuide').open = false;
+  $('birdGuide').querySelector('summary').focus();
+}
+$('closeBirdGuide').onclick = closeBirdGuide;
+$('birdGuide').onkeydown = event => {
+  if (event.key === 'Escape' && $('birdGuide').open) closeBirdGuide();
+};
+
+function renderGuideNight(o) {
+  const traffic = o.traffic_birds_per_km_h;
+  if (traffic == null) {
+    $('guideNight').textContent = `For ${o.night}, the radar couldn’t give a usable migration rate.`;
+    return;
+  }
+  const changeCount = o.tiers.off + o.tiers.dim + o.tiers.reduce;
+  $('guideNight').textContent = `On ${o.night}, radar estimated ${fmt(traffic)} migrating birds per kilometer per hour around NYC. ` +
+    `That’s a regional passage rate. The demo flagged ${fmt(changeCount)} of ${fmt(o.buildings)} buildings in your selected area for a lighting change.`;
+}
 
 // Keep navigation around the five boroughs while leaving room to inspect individual buildings.
 const nycBounds = L.latLngBounds([40.49, -74.26], [40.92, -73.69]);
@@ -174,6 +258,7 @@ $('run').onclick = async () => {
       body: JSON.stringify({ start: $('start').value, end: $('end').value, area: $('area').value,
                              weather: $('weather').value, minutes: Number($('minutes').value) }) });
     job = id; selected = null; $('run').disabled = true; $('nights').innerHTML = '';
+    $('guideNight').textContent = 'Waiting for a night from this replay.';
     $('log').classList.remove('empty'); $('log').textContent = 'Starting…';
     clearInterval(poll); poll = setInterval(refresh, 1500); refresh();
   } catch (e) { $('error').textContent = e.message; }
@@ -210,6 +295,7 @@ async function selectNight(night) {
 }
 
 function renderSummary(o) {
+  renderGuideNight(o);
   $('nightTitle').textContent = `Night of ${o.night} · sunset ${o.sunset_local} to sunrise ${o.sunrise_local}`;
   const stat = (value, label) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
   $('stats').innerHTML = [

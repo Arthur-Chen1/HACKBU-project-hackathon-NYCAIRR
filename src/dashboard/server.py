@@ -104,6 +104,8 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == "/":
             return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+        if url.path == "/bird-guide-suit.png":
+            return self._send(200, PAGE.with_name("bird-guide-suit.png").read_bytes(), "image/png")
         if url.path == "/api/options":
             return self._send(200, _json({"areas": building_analysis.DASHBOARD_AREAS, "presets": PRESETS,
                                           "default_area": building_analysis.DEFAULT_AREA,
