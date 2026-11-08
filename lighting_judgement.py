@@ -179,7 +179,7 @@ def score(row, weather=None):
 
 
 def _local(when):
-    return when.astimezone(NYC).strftime("%-I:%M %p") if when else None
+    return when.astimezone(NYC).strftime("%I:%M %p").lstrip("0") if when else None
 
 
 def judge(row, weather=None):

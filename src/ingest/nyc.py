@@ -3,12 +3,15 @@
 import csv
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 
 from pyproj import Geod
 from shapely import orient_polygons
 from shapely.geometry import mapping, shape
 from shapely.ops import unary_union
+
+from src.ingest.http import Cache
 
 SODA = "https://data.cityofnewyork.us/resource/"
 CITY_BOUNDS = (-74.26, 40.49, -73.69, 40.92)
@@ -45,29 +48,70 @@ def _pages(cache, dataset, columns, where, order):
             break
 
 
-def buildings(cache, bounds, extra_bins):
+def _lot_filter(column, bbls, *, quoted=False, borough=None):
+    # PLUTO stores BBL as a number. Building Footprints stores it as text.
+    for start in range(0, len(bbls), 300):
+        values = bbls[start:start + 300]
+        # Keep the original citywide batches so borough replays can reuse cached downloads.
+        if borough is not None and not values[0][0] <= borough <= values[-1][0]:
+            continue
+        if quoted:
+            values = [f"'{bbl}'" for bbl in values]
+        yield f"{column} in ({','.join(values)})"
+
+
+def buildings(cache, bounds, extra_bins, *, land_uses=None, borough=None, footprint_workers=1):
     west, south, east, north = bounds
     ring = f"{west} {south},{east} {south},{east} {north},{west} {north},{west} {south}"
     where = f"intersects(the_geom,'POLYGON (({ring}))')"
     if extra_bins:
         where += " OR bin in (" + ",".join(f"'{bin_id}'" for bin_id in sorted(extra_bins)) + ")"
 
+    # For a citywide commercial replay, select eligible lots before downloading geometry.
+    land_use = {}
+    footprint_filters = [where]
+    if land_uses is not None:
+        codes = ",".join(f"'{code}'" for code in sorted(land_uses))
+        for row in _pages(cache, "64uk-42ks", "bbl,landuse", f"landuse in ({codes})", "bbl"):
+            bbl = row["bbl"].partition(".")[0]
+            if re.fullmatch(r"\d{10}", bbl):
+                land_use[bbl] = row["landuse"]
+        footprint_filters = [f"({where}) AND {lots}" for lots in
+                             _lot_filter("mappluto_bbl", sorted(land_use), quoted=True, borough=borough)]
+
     parts = defaultdict(list)
     # Field definitions: github.com/CityOfNewYork/nyc-geo-metadata, Metadata_BuildingFootprints.md
     columns = "bin,mappluto_bbl,height_roof,the_geom,objectid,name,feature_code,construction_year,ground_elevation"
-    for row in _pages(cache, "5zhs-2jue", columns, where, "objectid"):
-        bin_id = row.get("bin", "")
-        if re.fullmatch(r"[1-5]\d{6}", bin_id) and bin_id[1:] != "000000" and row.get("the_geom"):
-            parts[bin_id].append(row)
+    def collect(footprints):
+        for row in footprints:
+            bin_id = row.get("bin", "")
+            if borough is not None and not bin_id.startswith(borough):
+                continue
+            if re.fullmatch(r"[1-5]\d{6}", bin_id) and bin_id[1:] != "000000" and row.get("the_geom"):
+                parts[bin_id].append(row)
 
-    bbls = sorted({row["mappluto_bbl"] for rows in parts.values() for row in rows
-                   if re.fullmatch(r"\d{10}", row.get("mappluto_bbl", ""))})
-    land_use = {}
-    for start in range(0, len(bbls), 300):
-        where = "bbl in (" + ",".join(bbls[start:start + 300]) + ")"
-        # Socrata serializes PLUTO's numeric BBL with trailing decimal zeros.
-        land_use.update((row["bbl"].partition(".")[0], row.get("landuse")) for row in
-                        _pages(cache, "64uk-42ks", "bbl,landuse", where, "bbl"))
+    if footprint_workers > 1 and len(footprint_filters) > 1:
+        # Each lot batch has its own request keys and its own HTTP session.
+        def fetch_batch(footprint_filter):
+            batch_cache = Cache(cache.root)
+            try:
+                return list(_pages(batch_cache, "5zhs-2jue", columns, footprint_filter, "objectid"))
+            finally:
+                batch_cache.session.close()
+
+        with ThreadPoolExecutor(max_workers=footprint_workers) as pool:
+            for batch in pool.map(fetch_batch, footprint_filters):
+                collect(batch)
+    else:
+        for footprint_filter in footprint_filters:
+            collect(_pages(cache, "5zhs-2jue", columns, footprint_filter, "objectid"))
+
+    if land_uses is None:
+        bbls = sorted({row["mappluto_bbl"] for rows in parts.values() for row in rows
+                       if re.fullmatch(r"\d{10}", row.get("mappluto_bbl", ""))})
+        for lot_filter in _lot_filter("bbl", bbls):
+            land_use.update((row["bbl"].partition(".")[0], row.get("landuse")) for row in
+                            _pages(cache, "64uk-42ks", "bbl,landuse", lot_filter, "bbl"))
 
     result = {}
     for bin_id, rows in parts.items():
