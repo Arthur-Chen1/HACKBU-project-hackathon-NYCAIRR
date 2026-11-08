@@ -221,6 +221,9 @@ def model_decisions(rows, settings):
             "score": row["expected_collision_count"], "expected_collision_count": row["expected_collision_count"],
             "risk_priority": row["risk_priority"], "risk_basis": row["risk_basis"],
             "risk_features": row["risk_features"], "decision_at_utc": row.get("decision_at_utc"),
+            "priority_rank": row.get("priority_rank"),
+            "priority_scored_buildings": row.get("priority_scored_buildings", 0),
+            "priority_basis": row.get("priority_basis"),
             "peak_window_utc": None, "reasons": [*row["risk_reasons"], *decision["reasons"]],
         })
     rank = {"high": 0, "medium": 1, "low": 2, "unavailable": 3}

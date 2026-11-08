@@ -2,6 +2,8 @@
 
 Investigation date: November 8, 2026. Scope: the dashboard's **Analyze buildings** action in forecast mode.
 
+**Later cleanup:** the [priority/UI patch](PRIORITY_UI.md) supersedes references below to demo priorities and website lighting decisions. Missing models now leave priority unavailable; website dimming has been removed. A forecast model artifact was present when the later cleanup began. Findings below describe the earlier investigation.
+
 ## Findings
 
 The request follows `src/dashboard/server.py` → `main.run_night` → NYC building loading →

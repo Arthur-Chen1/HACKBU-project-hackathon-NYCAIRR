@@ -107,7 +107,7 @@ def overview(analysis, decisions, weather, *, forecast=False, model=None):
     priorities = Counter(d["risk_priority"] for d in decisions)
     scored = sum(d["expected_collision_count"] is not None for d in decisions)
     if forecast and not model:
-        note = ("No forecast AI model: priorities use demo rules. Train it with "
+        note = ("No forecast AI model: estimates and priority are unavailable. Train it with "
                 "python -m src.models train --mode forecast to get expected counts.")
     elif forecast:
         note = "" if scored else "Expected counts unavailable. See each building’s reasons and input coverage."
@@ -151,7 +151,7 @@ def run_night(night, area=building_analysis.DEFAULT_AREA, weather="dryad", minut
     started = perf_counter()
     model_text = building_analysis.forecast_model_summary(model_path) if forecast else None
     if forecast and not model_text:
-        log("Forecast model missing: this run can show demo priorities, but no numeric collision estimates. "
+        log("Forecast model missing: collision estimates and priority are unavailable. "
             "See README.md forecast setup.")
     spec, buildings = area_buildings(area, log, night)
     buildings_ready = perf_counter()

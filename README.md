@@ -1,6 +1,6 @@
 # DarkSky Migrations
 
-DarkSky Migrations estimates how many bird collisions a morning survey might find at a building. It combines migration traffic, weather, building features, and available light data for each night. NYC building operators can use the resulting priorities and lighting scenarios to plan reductions in eligible lighting. Bright lights can draw nocturnal migrants toward buildings, where they can strike glass. [NYC collision study](https://doi.org/10.1111/1365-2664.14590)
+DarkSky Migrations estimates how many bird collisions a morning survey might find at a building. It combines migration traffic, weather, building features, and available light data for each night. NYC building operators can use the resulting priorities to identify buildings for attention. Bright lights can draw nocturnal migrants toward buildings, where they can strike glass. [NYC collision study](https://doi.org/10.1111/1365-2664.14590)
 
 The Python pipeline pulls and caches source data, exports building-night training rows, and fits two collision models. A Poisson regression scores historical replays. A gradient-boosted machine-learning model scores pre-sunset forecasts. [Model and implementation guide](MODEL_DESIGN.md)
 
@@ -10,6 +10,7 @@ The Python pipeline pulls and caches source data, exports building-night trainin
 MODEL_DESIGN.md           # Data contracts, model design, and evaluation plan
 MODEL_RUNBOOK.md          # What was trained, metrics, computational cost, and limits
 docs/FORECAST_ANALYSIS.md # Forecast loading findings, setup, and API integration request
+docs/PRIORITY_UI.md       # Unified priority scale and website cleanup decisions
 configs/                  # Verified study-site-to-BIN crosswalk (from the study's Table S2)
 main.py                   # Dashboard and command-line pipeline
 building_analysis.py      # NYC building-night rows and scoring
@@ -66,7 +67,7 @@ Start with `training.csv` and check `coverage.json` before selecting features. T
 ## Use the dashboard
 
 **Forecast setup:** numeric building estimates require a locally trained
-`data/processed/models/forecast.joblib`. Without it the dashboard shows demo priorities only.
+`data/processed/models/forecast.joblib`. Without it estimates and priority are unavailable.
 See [forecast setup and loading diagnostics](docs/FORECAST_ANALYSIS.md) for training commands,
 missing-input explanations, performance changes, and the requested migration API integration.
 
@@ -74,7 +75,7 @@ Run `python main.py` from the project root, or press Run on `main.py` in VS Code
 
 1. Choose **Historical replay** or **Pre-sunset forecast**, then a preset or an inclusive range of NYC nights, up to 31 nights before today. In forecast mode, you can type a regional migration forecast in birds/km/h, such as BirdCast's, with its New York issue time. It overrides the daily input file. Leave it blank and the forecast estimates migration from tonight's HRRR weather and past seasons. The **Forecast demo** presets replay 2021 nights with test migration values, so the forecast runs without any input files. The forecast AI model then estimates each building's expected collisions from HRRR weather, that forecast, the date, and the building's height and facade length.
 2. Choose an **area**: a borough (Manhattan by default), a Manhattan neighborhood (Midtown or Lower Manhattan), or **Pick grid cells on map** to click up to 9 cells. Cells are the same ~1.1 km grid as the radar analysis and do not need to touch. Borough loads include only lighting-program buildings (land use 4 or 5).
-3. Press **Analyze buildings**. Each night appears in the table as it finishes. Select a night to see the building map colored by priority, the radar density layer, and the migration timeline. Select a building to see its estimate, priority, rank among tonight's buildings, recommended action, and reasons. By default the map shades buildings by **risk relative to tonight** (top 1%, 5%, 10%, 25%, and the rest), so the riskiest buildings stand out even on a quiet night. Switch **Color buildings by** to **Priority (absolute)** for the high, medium, and low labels, which use fixed thresholds of 1 and 0.25 expected collisions. On a quiet night every building can be low.
+3. Press **Analyze buildings**. Each night appears in the table as it finishes. Select a night to see the priority map, radar density layer, and migration timeline. Select a building to see its estimate, priority, rank, and model explanations. There is one priority scale: **high** for roughly the top 20% of scored buildings in the selected area and night, **medium** for the next 30%, and **low** for the rest. Equal estimates share a tier; zero estimates are low and missing estimates are unavailable. These are relative attention priorities, so a high label on a quiet night does not imply a high absolute collision count. The AI's numeric estimates are unchanged. See [priority rules and cleanup decisions](docs/PRIORITY_UI.md). The website does not recommend dimming percentages because the AI does not predict their effect on collisions.
 
 For the command line, use `python main.py --cli`. Use `--area` for a borough, `citywide`, `midtown`, or `pilot`. Use `--cells ROW,COL ...` for grid cells, as in `python main.py --cli --start 2021-09-10 --cells 26,21 27,22`. A new replay night downloads about 100 MB of radar, which takes about a minute. Cached nights load in seconds.
 
@@ -169,9 +170,11 @@ night_date,bin,forecast_migration_birds_per_km_h,forecast_migration_issue_utc,fo
 2026-10-01,1000001,,,,12.5,0,2026-09-30T14:00:00Z,example-granule
 ```
 
-The pipeline fetches USNO astronomy and HRRR weather and uses a cutoff of one hour before sunset or the actual run time if earlier. Each building's HRRR values come from its nearest grid cell, found once per run, so weather costs about a second per night for any number of buildings. Without an issued migration forecast, the pipeline estimates regional traffic from tonight's HRRR weather at the NYC reference point and the Dryad seasons before that year. It is usable from March 31 to June 7 and August 30 to November 14, and is less accurate than an issued forecast: a typical night is off by a factor of about 3. It is recalibrated so busy nights can reach high. In 2019–2021 tests it called 17 of 37 high nights high, and 14 of its 42 high calls were quiet nights. With no input files, `python main.py --cli --forecast` therefore still scores tonight in season. When `forecast.joblib` is missing, the forecast shows a demo priority from the issued migration and weather, with available light data shown as context. An expected collision count requires the trained forecast model and valid inputs. Model priorities are high at an expected count of 1 or above and medium from 0.25 up to 1. The CLI saves building-night rows and lighting decisions as CSV and GeoJSON under `data/processed/buildings/` and `data/processed/judgements/`.
+The pipeline fetches USNO astronomy and HRRR weather and uses a cutoff of one hour before sunset or the actual run time if earlier. Each building's HRRR values come from its nearest grid cell, found once per run, with concurrent hourly downloads and progress reporting; actual loading time depends on cached data and source availability. Without an issued migration forecast, the pipeline estimates regional traffic from tonight's HRRR weather at the NYC reference point and the Dryad seasons before that year. It is usable from March 31 to June 7 and August 30 to November 14, and is less accurate than an issued forecast: a typical night is off by a factor of about 3. It is recalibrated so busy nights can reach high. In 2019–2021 tests it called 17 of 37 high nights high, and 14 of its 42 high calls were quiet nights. With no input files, `python main.py --cli --forecast` therefore still scores tonight in season. When `forecast.joblib` is missing, expected counts and priority are unavailable. An expected collision count requires the trained forecast model and valid inputs. Priority follows the single relative scale described above; the previous 1.0/0.25 thresholds and demo priority rules have been removed. The CLI saves building-night rows and lighting decisions as CSV and GeoJSON under `data/processed/buildings/` and `data/processed/judgements/`.
 
-## Set a dimming target
+## Set a dimming target (command line only)
+
+This existing operator-budget tool is separate from the website and does not estimate collision reductions. Website dimming recommendations were removed with user approval; see [the cleanup decision](docs/PRIORITY_UI.md).
 
 Supply operator-approved settings to calculate a dimming scenario. Leave `night_date` blank for the default settings for a BIN or specify a date to override those settings. Separate zones and approved reductions with `|`. Report scheduled, fixed, and target output in the same unit. Include emergency, egress, and other required lighting in the fixed output.
 
@@ -180,7 +183,7 @@ bin,night_date,eligible_zones,approved_reductions_pct,scheduled_eligible_light_o
 1000001,,facade|decorative,0|25|50|100,80,20,60,lm
 ```
 
-For a building in the lighting program with an available risk priority, the example selects a 50% reduction in the eligible zones from civil dusk to civil dawn. The scheduled 80 lm of eligible output falls to 40 lm, and the 20 lm of fixed output brings the total to the 60 lm operator cap. If the cap is unattainable at approved settings, the scenario calls for operator review. Satellite radiance describes neighborhood brightness. Estimating how a building's lighting changes collision risk requires a pilot that measures actual building light output and survey outcomes under approved settings.
+For a building in the lighting program with an available priority, the example selects a 50% reduction in the eligible zones from civil dusk to civil dawn. The scheduled 80 lm of eligible output falls to 40 lm, and the 20 lm of fixed output brings the total to the 60 lm operator cap. If the cap is unattainable at approved settings, the scenario calls for operator review. Satellite radiance describes neighborhood brightness. Estimating how a building's lighting changes collision risk requires a pilot that measures actual building light output and survey outcomes under approved settings.
 
 ## Milestones
 

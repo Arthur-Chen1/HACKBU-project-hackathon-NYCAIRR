@@ -1,6 +1,6 @@
 # DarkSky Migrations model design
 
-DarkSky will estimate the number of collisions a morning survey is expected to find at a building. The hackathon deliverable is a historical replay for a small set of Manhattan buildings, with explainable priorities and an illustrative dimming schedule. Keep the first version small enough to run locally. The current code supplies training data and replay inputs. [Setup and commands](README.md)
+DarkSky will estimate the number of collisions a morning survey is expected to find at a building. The hackathon deliverable is a historical replay for a small set of Manhattan buildings, with explainable building priorities. The website no longer offers dimming recommendations; the model has no validated lighting-response output. Keep the first version small enough to run locally. The current code supplies training data and replay inputs. [Setup and commands](README.md)
 
 ## Where new work belongs
 
@@ -64,17 +64,23 @@ The baseline report shows Black Marble catalog entries for 559 of 560 monitored 
 4. **Build a separate pre-sunset feature set.** The HRRR replay sets the decision time one hour before sunset and selects the latest hourly run initialized at least two hours before that decision. Treat the two-hour publication allowance as a replay assumption and verify availability when building the forecast evaluation set. Use only data available at the cutoff, including issued migration and weather forecasts, known astronomy, and previously available quality-checked radiance. Same-night observed migration, LaGuardia weather, and overnight satellite brightness belong in retrospective experiments. For a demo, a manually entered regional BirdCast forecast can be logged with its issue time. [BirdCast forecast information](https://birdcast.org/science-center/for-meteorologists/)
 5. **Save enough to reproduce each run.** Record the model and preprocessing versions, ordered feature list, source and feature versions, split dates and sites, metrics, and coverage. Keep generated outputs separate from source code. For a forecast model, report how often missing inputs prevent scoring.
 
-## From scores to a dimming schedule
+## Priority display and lighting scope
 
-The recommendation layer takes a candidate BIN, local night, score or rule priority, reason codes, input timestamps, and the operator's allowed settings. Return the priority, main factors, eligible zones, proposed reduction relative to scheduled output, local start and end times, and the basis for the action. Use the same BIN to join the dashboard row to `buildings.geojson`.
+The website uses one relative priority scale across its map, nightly counts, and building details.
+The top 20% of scored buildings in the selected area/night are high priority, the next 30% medium,
+and the rest low, with ties kept together and zero estimates always low. Missing estimates are
+unavailable. The underlying expected collision counts are unchanged; these labels are an attention
+policy, not absolute collision probabilities. [Exact rules](docs/PRIORITY_UI.md)
 
-For the hackathon, use configurable thresholds for high regional migration and conditions such as low visibility, low cloud ceilings, and seasonally adverse winds. Add neighborhood brightness when a usable reading is available. Mark the score unavailable when a required input is missing. Show approved example reductions such as 25%, 50%, or 100% from civil dusk to civil dawn. A 100% reduction applies only to eligible zones. Emergency, egress, and other required lighting stays outside the dimming plan.
-
-A pilot can estimate the effect of dimming by comparing approved settings on matched nights or randomizing among approved settings when feasible. Record what actually ran, measured facade lighting, weather, migration, and consistent survey effort and outcomes. With sufficient evidence, choose the smallest approved reduction that meets the pilot's collision-risk target and report uncertainty. Route cases with insufficient evidence to operator review.
+The user approved removing off/dim/reduce and lighting-budget details from the website. The model
+cannot estimate how a dimming percentage changes collisions, so no AI dimming rule is implemented.
+The existing command-line operator-budget calculator remains a separate utility. Any future
+collision-reduction recommendation needs measured lighting settings and survey outcomes, evaluation
+of the response to those settings, and a new user decision before implementation.
 
 ## First implementation pass
 
-Start with the saved baseline and place the trainer and evaluator under `src/models/`. Use the one-night HRRR replay to check timestamp and coverage handling before assembling a wider forecast set. Verify study-to-BIN mappings and rerun a night with satellite sampling before attributing gridded readings to individual buildings. Keep the training interface, demo rule, and dashboard output separate so the map can run while forecast inputs and pilot data are still being collected.
+Start with the saved baseline and place the trainer and evaluator under `src/models/`. Use the one-night HRRR replay to check timestamp and coverage handling before assembling a wider forecast set. Verify study-to-BIN mappings and rerun a night with satellite sampling before attributing gridded readings to individual buildings. Keep the training interface, priority assignment, and dashboard output separate so the map can run while forecast inputs and pilot data are still being collected.
 
 ## Status and decisions (November 2026)
 

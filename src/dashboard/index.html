@@ -9,7 +9,7 @@
 <style>
   :root {
     --bg: #f5f6f8; --panel: #fff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb;
-    --accent: #2b59c3; --off: #c0392b; --dim: #e67e22; --reduce: #f1c40f; --none: #b8bec8;
+    --accent: #2b59c3; --error: #c0392b; --notice: #e67e22;
     --high: #c0392b; --medium: #e67e22; --low: #2e8b57; --unknown: #7f8c8d;
   }
   * { box-sizing: border-box; }
@@ -31,7 +31,7 @@
   .gridbox { margin-top: 10px; padding: 10px; border: 1px dashed #b9c6e6; border-radius: 8px; background: #f7f9fe; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
   #log { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); max-height: 130px; overflow: auto; white-space: pre-wrap; }
-  #error { color: var(--off); font-size: 13px; margin-top: 8px; }
+  #error { color: var(--error); font-size: 13px; margin-top: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
@@ -44,7 +44,7 @@
   .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
   .stat > span { font-size: 12px; color: var(--muted); }
   .basemap { filter: grayscale(1) contrast(.85) brightness(1.08); }
-  #note { margin-top: 8px; font-size: 13px; color: var(--dim); }
+  #note { margin-top: 8px; font-size: 13px; color: var(--notice); }
   #map { height: 520px; border-radius: 10px; border: 1px solid var(--line); }
   .bottom { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 8px; align-items: center; }
@@ -59,7 +59,7 @@
 <body>
 <header>
   <h1>DarkSky Migrations</h1>
-  <span>Building-night collision estimates and lighting recommendations</span>
+  <span>Building-night collision estimates and priorities</span>
 </header>
 <div class="layout">
   <div class="side">
@@ -113,7 +113,7 @@
     <div class="card">
       <h2>Nights in period</h2>
       <table>
-        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">High</th><th class="num">Review</th></tr></thead>
+        <thead><tr><th>Night</th><th>Migration</th><th class="num">Scored</th><th class="num">High</th><th class="num">Medium</th></tr></thead>
         <tbody id="nights"></tbody>
       </table>
       <div class="hint">Click a night to map it.</div>
@@ -128,16 +128,13 @@
     <div>
       <div id="map"></div>
       <div class="legend">
-        <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">Color buildings by
-          <select id="colorBy" style="width:auto;padding:3px 6px">
-            <option value="relative">Risk relative to tonight</option>
-            <option value="priority">Priority (absolute)</option>
-          </select></label>
+        <b>Building priority</b>
         <span id="buildingLegend" style="display:contents"></span>
         <span><i class="swatch" style="background:#3b6fd8;opacity:.5"></i>Radar: birds relative to NYC tonight (darker = more)</span>
         <label style="margin:0;display:inline-flex;gap:5px;align-items:center;color:var(--ink)">
           <input type="checkbox" id="showCells" checked style="width:auto"> Radar layer</label>
       </div>
+      <div class="hint">Priority is relative to scored buildings in this area and night: high ≈ top 20%, medium ≈ next 30%, low ≈ remaining 50%. Equal estimates share a priority; zero estimates are low. High priority can occur on a quiet night and does not mean a high absolute collision count.</div>
     </div>
     <div class="bottom">
       <div class="card"><h2>Migration through the night</h2><div id="timeline" class="empty">Run a period to see the radar timeline.</div></div>
@@ -149,42 +146,12 @@
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const priorityColor = p => css('--' + (p === 'unavailable' ? 'unknown' : p));
-// Ordered single-hue ramp (light = lower, dark = higher), lightest step >= 2:1 on the basemap.
-const RELATIVE_BINS = [
-  { label: 'Bottom 75%', top: 1.00, color: '#ec9060' },
-  { label: 'Top 25%', top: 0.25, color: '#e46f38' },
-  { label: 'Top 10%', top: 0.10, color: '#cc5220' },
-  { label: 'Top 5%', top: 0.05, color: '#9e3c15' },
-  { label: 'Top 1%', top: 0.01, color: '#6b260a' },
-];
 const PRIORITY_LEGEND = [['high', 'High priority'], ['medium', 'Medium priority'], ['low', 'Low priority']];
-
-// Rank each building's expected count among tonight's scored buildings (1 = highest).
-function rankBuildings(features) {
-  const scored = features.filter(f => f.properties.expected_collision_count != null)
-    .sort((a, b) => b.properties.expected_collision_count - a.properties.expected_collision_count);
-  scored.forEach((f, i) => {
-    const ties = i && scored[i - 1].properties.expected_collision_count === f.properties.expected_collision_count;
-    f.properties._rank = ties ? scored[i - 1].properties._rank : i + 1;
-    f.properties._scored = scored.length;
-  });
-}
-function relativeBin(p) {
-  if (p._rank == null) return null;
-  const share = p._rank / p._scored;
-  return [...RELATIVE_BINS].reverse().find(bin => share <= bin.top);
-}
-function buildingColor(p) {
-  if ($('colorBy').value === 'priority') return priorityColor(p.risk_priority);
-  const bin = relativeBin(p);
-  return bin ? bin.color : css('--unknown');
-}
+const buildingColor = p => priorityColor(p.risk_priority);
 function renderLegend() {
   const swatch = (color, label) => `<span><i class="swatch" style="background:${color}"></i>${label}</span>`;
-  const items = $('colorBy').value === 'priority'
-    ? PRIORITY_LEGEND.map(([key, label]) => swatch(css('--' + key), label))
-    : RELATIVE_BINS.map(bin => swatch(bin.color, bin.label));
-  $('buildingLegend').innerHTML = [...items, swatch(css('--unknown'), 'Unavailable')].join('');
+  $('buildingLegend').innerHTML = [...PRIORITY_LEGEND.map(([key, label]) => swatch(css('--' + key), label)),
+    swatch(css('--unknown'), 'Unavailable')].join('');
 }
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
@@ -196,7 +163,7 @@ const map = L.map('map', { preferCanvas: true, minZoom: 10, maxBounds: nycBounds
   .setView(nycBounds.getCenter(), 10);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, className: 'basemap' }).addTo(map);
-let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null, nightData = null;
+let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null;
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -316,7 +283,7 @@ async function init() {
     $('modeHint').textContent = forecast
       ? (options.forecast_model_available
         ? 'The forecast model scores each building from weather, migration, the date, roof height, and facade length. Loading progress appears below.'
-        : 'Forecast model is not installed. Analysis will show demo priorities only; numeric collision estimates require the forecast setup in README.md.')
+        : 'Forecast model is not installed. Estimates and priority are unavailable until the forecast setup in README.md is complete.')
       : 'A new replay downloads about 100 MB of radar. Each night starts at sunset in New York.';
   }
   $('mode').onchange = () => {
@@ -361,11 +328,11 @@ async function refresh() {
 
 function renderTable(nights) {
   $('nights').innerHTML = nights.map(n => n.error
-    ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--off)">${esc(n.error)}</td></tr>`
+    ? `<tr><td>${n.night}</td><td colspan="4" style="color:var(--error)">${esc(n.error)}</td></tr>`
     : `<tr data-night="${n.night}" class="${n.night === selected ? 'selected' : ''}">
         <td>${n.night}</td><td><span class="badge" style="background:${css('--' + n.level)}">${n.level}</span></td>
         <td class="num">${fmt(n.scored_buildings)}</td><td class="num">${fmt(n.priorities.high || 0)}</td>
-        <td class="num">${fmt(n.tiers.review)}</td></tr>`).join('');
+        <td class="num">${fmt(n.priorities.medium || 0)}</td></tr>`).join('');
   for (const tr of $('nights').querySelectorAll('tr[data-night]')) tr.onclick = () => selectNight(tr.dataset.night);
 }
 
@@ -386,19 +353,14 @@ function renderSummary(o) {
     stat(`${fmt(o.scored_buildings)} / ${fmt(o.buildings)}`, 'building-nights with expected counts'),
     stat(`${fmt(o.priorities.high || 0)} / ${fmt(o.priorities.medium || 0)} / ${fmt(o.priorities.low || 0)}`, 'high / medium / low priority'),
     stat(fmt(o.max_expected_collision_count, 2), 'highest expected collisions'),
-    stat(`${fmt(o.tiers.off)} / ${fmt(o.tiers.dim)} / ${fmt(o.tiers.reduce)}`, `off / dim / reduce of ${fmt(o.buildings)}`),
+    stat(fmt(o.priorities.unavailable || 0), 'priority unavailable'),
   ].join('');
   const context = o.mode === 'observed' ? `${o.scans_used} of ${o.scans_processed} radar scans usable`
     : (o.decision_at_utc ? `Forecast cutoff ${o.decision_at_utc}` : 'Forecast cutoff unavailable');
-  const quiet = o.scored_buildings && !o.priorities.high && !o.priorities.medium
-    ? `Quiet night: no building reaches medium priority (0.25 expected collisions). The map shades buildings by risk relative to tonight.`
-    : '';
-  $('note').textContent = [quiet, o.note, o.model, o.weather, context].filter(Boolean).join(' · ');
+  $('note').textContent = [o.note, o.model, o.weather, context].filter(Boolean).join(' · ');
 }
 
 function renderMap(data, refit = true) {
-  nightData = data;
-  rankBuildings(data.buildings.features);
   renderLegend();
   if (cellLayer) map.removeLayer(cellLayer);
   if (buildingLayer) map.removeLayer(buildingLayer);
@@ -415,25 +377,17 @@ function renderMap(data, refit = true) {
   if (data.buildings.features.length) { if (refit) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] }); }
   else $('note').textContent += ' · No buildings in the lighting program inside this area (water, parks, or residential only).';
 }
-$('colorBy').onchange = () => { renderLegend(); if (nightData) renderMap(nightData, false); };
 renderLegend();
 $('showCells').onchange = () => cellLayer && ($('showCells').checked ? cellLayer.addTo(map) : map.removeLayer(cellLayer));
 
 function renderDetail(p) {
   $('detail').className = '';
-  const window = p.start_local ? `${p.start_local} to ${p.end_local}` : '';
-  const reduction = p.reduction_pct == null ? '' : ` · ${fmt(p.reduction_pct)}% reduction`;
-  const output = p.projected_artificial_light_output == null ? ''
-    : `<div>Projected light output ${fmt(p.projected_artificial_light_output, 2)} ${esc(p.light_output_unit)}
-       · cap ${fmt(p.target_artificial_light_output, 2)} ${esc(p.light_output_unit)}</div>`;
   $('detail').innerHTML = `
     <div><b>${esc(p.name || 'BIN ' + p.bin)}</b> ${p.name ? `<span class="empty">BIN ${p.bin}</span>` : ''}</div>
     <div class="empty">${esc(p.land_use || 'Unknown use')} · ${fmt(p.height_m)} m${p.year ? ' · built ' + p.year : ''}</div>
-    <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)}</span>
+    <p style="margin:10px 0 4px"><span class="badge" style="background:${priorityColor(p.risk_priority)}">${esc(p.risk_priority)} priority</span>
       <b style="margin-left:6px">${fmt(p.expected_collision_count, 3)} expected collisions</b> · ${esc(p.risk_basis)}</p>
-    ${p._rank ? `<div>Rank ${fmt(p._rank)} of ${fmt(p._scored)} buildings tonight (${relativeBin(p).label.toLowerCase()})</div>` : ''}
-    <div>${esc(p.action)}${reduction}${window ? ' · ' + esc(window) : ''}</div>
-    ${output}
+    ${p.priority_rank ? `<div>Rank ${fmt(p.priority_rank)} of ${fmt(p.priority_scored_buildings)} scored buildings in this area tonight</div>` : ''}
     <ul>${p.reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;
 }
 

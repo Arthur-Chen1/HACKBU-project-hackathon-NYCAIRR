@@ -75,17 +75,15 @@ from requests import RequestException
 
 import migration_analysis
 from src.features.daily import forecast_rows
-from src.features.model_inputs import forecast_issues, natural_light_features, number, usable_radiance
 from src.features.training import write_csv, write_json
 from src.ingest import dryad, hrrr, nyc, usno
 from src.ingest.http import Cache
 from src.models.count import DEFAULT_OBSERVED_MODEL, load_model
 from src.models.forecast_ai import DEFAULT_FORECAST_MODEL, load_forecast_model
+from src.recommendations.priority import assign_priorities
 
 OUTPUT_DIR = Path("data/processed/buildings")
 RAW_DIR = Path("data/raw")
-HIGH_EXPECTED_COUNT = 1.0
-MEDIUM_EXPECTED_COUNT = 0.25
 DEFAULT_AREA = "manhattan"
 BOROUGH_CODES = {"manhattan": "1", "bronx": "2", "brooklyn": "3", "queens": "4", "staten-island": "5"}
 AREAS = {
@@ -211,47 +209,17 @@ def model_summary(model):
             f"{coverage.get('last_night')})")
 
 
-def _demo_priority(row):
-    issues = list(forecast_issues(row))
-    traffic = number(row.get("forecast_migration_birds_per_km_h"), 0)
-    visibility = number(row.get("forecast_visibility_m"), 0)
-    ceiling = number(row.get("forecast_cloud_ceiling_m"), 0)
-    light = natural_light_features(row)
-    if traffic is None:
-        issues.append("forecast migration traffic")
-    if visibility is None:
-        issues.append("forecast visibility")
-    if light["potential_moonlit_hours"] is None:
-        issues.append("Sun and Moon coverage")
-    if issues:
-        return "unavailable", ("Missing or unusable inputs: " + ", ".join(dict.fromkeys(issues)),)
-
-    priority = migration_analysis.level(traffic)
-    reasons = [f"Issued migration forecast of {traffic:,.0f} birds/km/h"]
-    if visibility < 8_000 or (ceiling is not None and ceiling < 1_000):
-        reasons.append("Low visibility or low forecast cloud ceiling")
-        if priority == "medium":
-            priority = "high"
-    reasons.append(f"{light['potential_moonlit_hours']:.1f} potential moonlit hours before cloud effects")
-    radiance = usable_radiance(row, "forecast")
-    if radiance is not None:
-        reasons.append(f"Prior neighborhood radiance {radiance:g} (quality-checked satellite sample)")
-    return priority, tuple(reasons)
-
-
 def score_buildings(rows, model, *, mode):
     """Keep the building-night inputs, score, and actual fitted features in each output row."""
     scored = []
     # The forecast AI model scores a whole batch at once; the Poisson model scores row by row.
     batch = model.score_rows(rows) if hasattr(model, "score_rows") else None
     for index, row in enumerate(rows):
-        expected, priority, features = None, "unavailable", ()
+        expected, features = None, ()
         basis = getattr(model, "basis", f"{mode} Poisson model")
-        if model is None and mode == "forecast":
-            basis = "forecast demo rules"
-            priority, reasons = _demo_priority(row)
-        elif model is None:
-            reasons = ("Train an observed model with python -m src.models train",)
+        if model is None:
+            basis = f"{mode} model unavailable"
+            reasons = (f"Expected counts and priority require a trained {mode} model; see README.md setup",)
         else:
             if batch is not None:
                 result = batch[index]
@@ -265,21 +233,19 @@ def score_buildings(rows, model, *, mode):
                     "No fitted model is available for these inputs",)
             else:
                 features = tuple(result.features if batch is not None else model.features_for(row))
-                priority = ("high" if expected >= HIGH_EXPECTED_COUNT else
-                            "medium" if expected >= MEDIUM_EXPECTED_COUNT else "low")
                 reasons = tuple(f"{field.replace('_', ' ')} {'raised' if effect > 0 else 'lowered'} the estimate"
                                 for field, effect in contributions[:3] if effect)
-        scored.append({**row, "expected_collision_count": expected, "risk_priority": priority,
+        scored.append({**row, "expected_collision_count": expected,
                        "risk_basis": basis, "risk_features": features,
                        "risk_reasons": (*row.get("source_issues", ()), *reasons)})
-    return scored
+    return assign_priorities(scored)
 
 
 def analyze_forecast(buildings, night, inputs, *, model_path=None, cache=RAW_DIR, now=None, log=None):
     log = log or (lambda _: None)
     model = _model(model_path, "forecast")
     rows = forecast_rows(buildings, night, inputs, cache, now=now, log=log)
-    log(f"Scoring {len(rows):,} buildings" + (" (demo priorities only; forecast model missing)" if model is None else ""))
+    log(f"Scoring {len(rows):,} buildings" + (" (forecast model missing; estimates unavailable)" if model is None else ""))
     return score_buildings(rows, model, mode="forecast")
 
 

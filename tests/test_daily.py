@@ -61,17 +61,21 @@ class DailyForecastTests(unittest.TestCase):
             row = result["rows"][0]
             self.assertEqual((row["bin"], row["night_date"], row["prior_neighborhood_radiance"]), (BIN, NIGHT, 0))
             feature = json.loads(_json(_night_payload(result)))["buildings"]["features"][0]["properties"]
-            self.assertEqual((feature["risk_priority"], feature["reduction_pct"]), ("high", 50))
+            self.assertEqual(feature["risk_priority"], "unavailable")
+            self.assertNotIn("reduction_pct", feature)
+            self.assertNotIn("action", feature)
+            self.assertNotIn("tier", feature)
+            self.assertFalse(any("light budget" in reason for reason in feature["reasons"]))
             self.assertIsNone(feature["expected_collision_count"])
             with csv_path.open() as file:
                 self.assertEqual(next(csv.DictReader(file))["expected_collision_count"], "")
 
-    def test_late_migration_makes_priority_unavailable(self):
+    def test_missing_model_does_not_invent_a_demo_priority(self):
         row = {**LIGHT, **WEATHER, "night_date": NIGHT, "forecast_migration_birds_per_km_h": 2500,
                "forecast_migration_issue_utc": "2021-10-01T21:45:00Z", "decision_at_utc": "2021-10-01T21:38:00Z"}
         result = building_analysis.score_buildings([row], None, mode="forecast")[0]
         self.assertEqual(result["risk_priority"], "unavailable")
-        self.assertIn("forecast_migration_issue_utc", result["risk_reasons"][0])
+        self.assertIn("trained forecast model", result["risk_reasons"][0])
 
     def test_morning_forecast_selects_extended_hrrr_run(self):
         now = datetime(2021, 10, 1, 12, 30, tzinfo=UTC)

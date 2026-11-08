@@ -95,7 +95,11 @@ def _night_payload(result):
     for d in result["decisions"]:
         row = rows[d["bin"]]
         buildings.append({"type": "Feature", "geometry": row["geometry"], "properties": {
-            **d,
+            **{key: d.get(key) for key in ("bin", "bbl", "name", "night_date", "expected_collision_count",
+                                          "risk_priority", "risk_basis", "risk_features", "decision_at_utc",
+                                          "priority_rank", "priority_scored_buildings", "priority_basis")},
+            # The website presents model explanations, without the CLI's lighting-budget reasons.
+            "reasons": row["risk_reasons"],
             "height_m": row["roof_height_m"], "land_use": row["land_use_label"],
             "year": row["construction_year"], "relative_density": row.get("neighborhood_relative_density"),
         }})
