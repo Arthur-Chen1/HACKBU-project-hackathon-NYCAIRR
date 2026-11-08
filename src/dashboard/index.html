@@ -124,12 +124,15 @@
 <script>
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const TIER = { off: '--off', dim: '--dim', reduce: '--reduce', none: '--none', not_in_program: '--none' };
+const TIER = Object.fromEntries(['off', 'dim', 'reduce', 'none'].map(tier => [tier, css(`--${tier}`)]));
 const fmt = (x, d = 0) => x == null ? '–' : Number(x).toLocaleString(undefined, { maximumFractionDigits: d });
 const compass = deg => deg == null ? '–' : ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8] + ` (${fmt(deg)}°)`;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-const map = L.map('map').setView([40.755, -73.985], 14);
+// Keep navigation around the five boroughs while leaving room to inspect individual buildings.
+const nycBounds = L.latLngBounds([40.49, -74.26], [40.92, -73.69]);
+const map = L.map('map', { preferCanvas: true, minZoom: 10, maxBounds: nycBounds, maxBoundsViscosity: 1 })
+  .setView(nycBounds.getCenter(), 10);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, className: 'basemap' }).addTo(map);
 let cellLayer = null, buildingLayer = null, job = null, selected = null, poll = null;
@@ -143,8 +146,18 @@ async function api(path, options) {
 
 async function init() {
   const options = await api('/api/options');
-  for (const area of options.areas) $('area').add(new Option(area[0].toUpperCase() + area.slice(1), area));
-  $('area').value = 'midtown';
+  const labels = { manhattan: 'Manhattan', bronx: 'The Bronx', brooklyn: 'Brooklyn', queens: 'Queens',
+    'staten-island': 'Staten Island', midtown: 'Midtown', pilot: 'Lower Manhattan' };
+  const boroughs = document.createElement('optgroup');
+  boroughs.label = 'Boroughs';
+  const neighborhoods = document.createElement('optgroup');
+  neighborhoods.label = 'Manhattan neighborhoods';
+  for (const area of options.areas) {
+    const group = area === 'midtown' || area === 'pilot' ? neighborhoods : boroughs;
+    group.append(new Option(labels[area] ?? area, area));
+  }
+  $('area').append(boroughs, neighborhoods);
+  $('area').value = options.default_area;
   options.presets.forEach((p, i) => $('preset').add(new Option(p.label, i)));
   $('preset').onchange = () => {
     const p = options.presets[$('preset').value];
@@ -219,7 +232,7 @@ function renderMap(data) {
     stroke: false, fillColor: '#3b6fd8', fillOpacity: 0.08 + 0.45 * (f.properties.mean_birds_per_km2 / top) }) });
   if ($('showCells').checked) cellLayer.addTo(map);
   buildingLayer = L.geoJSON(data.buildings, {
-    style: f => ({ color: '#444', weight: 0.4, fillColor: css(TIER[f.properties.tier]), fillOpacity: 0.85 }),
+    style: f => ({ color: '#444', weight: 0.4, fillColor: TIER[f.properties.tier] ?? TIER.none, fillOpacity: 0.85 }),
     onEachFeature: (f, layer) => layer.on('click', () => renderDetail(f.properties)),
   }).addTo(map);
   if (data.buildings.features.length) map.fitBounds(buildingLayer.getBounds(), { padding: [10, 10] });

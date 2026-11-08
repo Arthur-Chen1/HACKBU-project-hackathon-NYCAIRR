@@ -19,8 +19,10 @@ RADIANCE_COLUMNS = (
 
 
 def coverage(cache, rows, output):
+    """Export labeled Dryad rows and report which nights have NASA catalog entries."""
     labeled = [row for row in rows if row["observed_collision_count"] is not None]
     nights = {row["night_date"] for row in labeled}
+    # Query the catalog for available tiles. The baseline CSV uses only Dryad data.
     granules = viirs.granules_by_date(cache, min(nights) + DAY, max(nights) + DAY, nyc.CITY_BOUNDS)
     satellite_nights = {night for night in nights if night + DAY in granules}
     write_csv(output / "baseline.csv", labeled)
@@ -40,6 +42,7 @@ def coverage(cache, rows, output):
 
 
 def _merge_night(rows, buildings, crosswalk, natural, light, forecasts):
+    """Attach the available building and environmental fields to each survey row."""
     for survey in rows:
         bin_id = crosswalk.get(survey["study_building_id"])
         feature = buildings.get(bin_id)
@@ -63,6 +66,7 @@ def _merge_night(rows, buildings, crosswalk, natural, light, forecasts):
 
 
 def pull(cache, rows, args):
+    """Add source data for the requested nights and report how much could be joined."""
     grouped = defaultdict(list)
     for row in rows:
         if args.start <= row["night_date"] <= args.end:
@@ -70,6 +74,7 @@ def pull(cache, rows, args):
     if not grouped:
         raise ValueError("No monitored Dryad nights in the requested date range; run coverage for available dates")
 
+    # A verified mapping lets us connect study site codes to actual NYC footprints.
     crosswalk = nyc.crosswalk(args.crosswalk)
     known_sites = {row["study_building_id"] for row in rows}
     if unknown := crosswalk.keys() - known_sites:
@@ -84,6 +89,7 @@ def pull(cache, rows, args):
     for night, surveys in sorted(grouped.items()):
         print(f"Processing {night} ({len(surveys)} surveyed buildings)", file=sys.stderr, flush=True)
         natural = usno.natural_light(cache, night)
+        # Unmatched survey sites share the NYC reference point for gridded inputs.
         points = {None: nyc.NYC_POINT}
         for survey in surveys:
             bin_id = crosswalk.get(survey["study_building_id"])
@@ -109,6 +115,7 @@ def pull(cache, rows, args):
     if args.weather == "hrrr":
         full = [row for row in with_buildings if row["hrrr_expected_hours"]
                 and row["hrrr_expected_hours"] == row["hrrr_required_field_hours"]]
+    # Keep every labeled row in the main export and write fully joined rows separately.
     columns = list(result[0])
     write_csv(output / "training.csv", labeled, columns)
     write_csv(output / "training_complete.csv", full, columns)
@@ -265,6 +272,7 @@ def main():
         if args.command == "radar":
             radar(cache, args)
             return
+        # Coverage and pull start with the same Dryad building-night survey records.
         rows = list(building_nights(dryad.surveys(cache)))
         if args.command == "coverage":
             coverage(cache, rows, args.output)

@@ -1,4 +1,4 @@
-# How the bird collision model would work
+# How the bird collision model works
 
 ## What data can we pull today?
 
@@ -18,11 +18,23 @@ The baseline CSV already contains the surveys, migration, and observed weather. 
 
 One row is **one building on one NYC night**. `night_date` is the local date when the night starts. A survey done the next morning supplies the outcome for that row. Two buildings on the same night can share migration, moonlight, and weather values. Once matched to their footprints, they can have different roof heights, land uses, and neighborhood brightness. If two buildings have identical model inputs, the model gives them the same estimate.
 
-## Will each building get a risk percentage?
+## What does a risk percentage mean?
 
-**Yes, that’s the proposed output once a model is trained and validated.** A **30% risk** means that, for building-nights with similar inputs, a comparable morning survey is expected to find at least one bird collision about 30 times out of 100. The surveys count birds that were found, so this probability depends on how the buildings were monitored. The current pipeline produces the data for training. The hackathon demo can show **low, medium, or high priority** using rules while the team builds and tests the model.
+A **30% estimated risk** means the model predicts that a comparable morning survey would find at least one bird collision about 30 times out of 100 under similar conditions. Survey coverage affects what gets found. The current model uses regional inputs, so buildings on the same night can receive identical scores.
 
-## How do the inputs become a prediction?
+## What does `train.py` do?
+
+1. **Read the surveys.** The default input is `data/processed/baseline.csv`. The outcome is whether `observed_collision_count` is greater than zero. Rows with blank outcomes are skipped.
+2. **Split by date.** Nights before January 1, 2021 go into training. Nights on or after that date go into testing. All surveys from a single night stay together. Some buildings may appear in both periods.
+3. **Fit the model.** The baseline inputs are observed migration traffic, visibility, cloud ceiling, east–west and north–south wind, temperature, and a fall-season indicator. With the joined CSV, the script also uses roof height, footprint area, moon illumination, time the Moon is above the horizon, and neighborhood radiance when those columns have values in the training period. The pipeline fills missing numeric inputs with training medians, puts the features on comparable scales, and fits a logistic regression.
+4. **Evaluate the model.** The script compares the model with a seasonal baseline that assigns each survey the positive survey rate for that season in the training data. Higher **average precision** means positive surveys tend to rank higher. Lower **Brier score** means predicted probabilities have lower mean squared error against the observed outcomes.
+5. **Save the fitted pipeline.** `data/processed/collision_model.joblib` contains the fitted preprocessing and model, plus the expected feature order. It is fitted on the training period. The test period is reserved for evaluation.
+
+From the project directory, run `python train.py` with the project environment active. Use `--input` to choose a different CSV with the same columns, `--test-start YYYY-MM-DD` to change the first test night, and `--output` to choose the model file path. Run `python train.py --help` to see the options.
+
+The default run trained on 3,553 surveys and tested on 1,869. The model scored 0.380 average precision and 0.169 Brier score, compared with 0.270 and 0.174 for the seasonal baseline. This evaluation measures performance on later nights using observed conditions. Live alerts need a separate evaluation using forecasts available before the alert, and performance on unfamiliar buildings needs a building holdout.
+
+## How would a building-specific forecast work?
 
 1. **Build the row.** Match the survey site to a NYC building ID and attach the building details. Use its location to look up weather and satellite brightness, then add the region’s migration estimate and the night’s Sun and Moon data. Unmatched sites can still support a baseline using regional inputs.
 2. **Learn from past surveys.** Turn each usable survey into a simple outcome. If the survey found at least one collision, the answer is yes. If it found zero, the answer is no. A simple probability model can learn whether combinations like heavy migration and poor visibility tend to come with more yes outcomes. The count model outlined in the README can also estimate how many birds a survey might find.

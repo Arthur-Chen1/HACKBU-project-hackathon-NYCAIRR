@@ -105,7 +105,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             return self._send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
         if url.path == "/api/options":
-            return self._send(200, _json({"areas": list(building_analysis.AREAS), "presets": PRESETS,
+            return self._send(200, _json({"areas": building_analysis.DASHBOARD_AREAS, "presets": PRESETS,
+                                          "default_area": building_analysis.DEFAULT_AREA,
                                           "weather": ["none", "dryad", "hrrr"], "max_nights": pipeline.MAX_NIGHTS}))
         job = _jobs.get(query.get("id"))
         if url.path == "/api/job":
@@ -127,8 +128,9 @@ class Handler(BaseHTTPRequestHandler):
             start = date.fromisoformat(body["start"])
             end = date.fromisoformat(body.get("end") or body["start"])
             pipeline.validate(start, end)
-            area, weather, minutes = body.get("area", "midtown"), body.get("weather", "none"), int(body.get("minutes", 60))
-            if area not in building_analysis.AREAS or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60):
+            area = body.get("area", building_analysis.DEFAULT_AREA)
+            weather, minutes = body.get("weather", "none"), int(body.get("minutes", 60))
+            if area not in building_analysis.DASHBOARD_AREAS or weather not in ("none", "dryad", "hrrr") or minutes not in (30, 60):
                 raise ValueError("Unsupported area, weather source, or scan interval")
         except (KeyError, ValueError, json.JSONDecodeError) as error:
             return self._error(400, str(error))

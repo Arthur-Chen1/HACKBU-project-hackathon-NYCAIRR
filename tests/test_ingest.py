@@ -7,7 +7,7 @@ import h5py
 
 from src.features.training import building_nights, date_coverage
 from src.ingest.hrrr import _field_ranges, forecast_hours
-from src.ingest.nyc import PILOT_BOUNDS, buildings
+from src.ingest.nyc import CITY_BOUNDS, PILOT_BOUNDS, buildings
 from src.ingest.usno import natural_light
 from src.ingest.viirs import FIELDS, sample_file
 
@@ -89,6 +89,26 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(props["land_use"], "5")
         self.assertAlmostEqual(props["roof_height_m"], 30.48)
         self.assertGreater(props["footprint_area_m2"], 0)
+
+    def test_citywide_buildings_query_eligible_lots_in_all_five_boroughs(self):
+        class Socrata:
+            def json(self, source, url, *, params):
+                where = params["$where"]
+                if url.endswith("64uk-42ks.json"):
+                    assert where == "landuse in ('4','5')"
+                    return [{"bbl": f"{borough}000010001.0", "landuse": "5"} for borough in range(1, 6)]
+                assert "intersects(the_geom" in where
+                assert all(f"'{borough}000010001'" in where for borough in range(1, 6))
+                return [{
+                    "bin": f"{borough}000001", "mappluto_bbl": f"{borough}000010001", "feature_code": "2100",
+                    "the_geom": {"type": "Polygon", "coordinates": [[
+                        [-74.01, 40.71], [-74.011, 40.71], [-74.01, 40.711], [-74.01, 40.71],
+                    ]]},
+                } for borough in range(1, 6)]
+
+        features = buildings(Socrata(), CITY_BOUNDS, set(), land_uses={4, 5})
+        self.assertEqual(set(features), {f"{borough}000001" for borough in range(1, 6)})
+        self.assertTrue(all(feature["properties"]["land_use"] == "5" for feature in features.values()))
 
     def test_black_marble_respects_grid_orientation_and_quality(self):
         with TemporaryDirectory() as temp:

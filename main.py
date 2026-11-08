@@ -5,7 +5,7 @@ and options; each night in the period is processed and judged, then shown on a m
 per-night summary table, the migration timeline, and every building's reasons.
 
 Terminal mode, for quick tests:
-    python main.py --cli --start 2021-09-10 --end 2021-09-12 --area midtown --weather dryad
+    python main.py --cli --start 2021-09-10 --area queens --weather dryad
 
 The first run of a night downloads ~100 MB of NEXRAD radar (about a minute at hourly scans); later
 runs read the cache in data/raw.
@@ -15,13 +15,13 @@ Functions
 nights(start, end) -> list[date]
     Every local night from start to end, inclusive.
 
-run_night(night, area="pilot", weather="none", minutes=60, log=print) -> dict
+run_night(night, area="manhattan", weather="none", minutes=60, log=print) -> dict
     Runs the whole pipeline for one night and returns
     {"night": date, "overview": dict, "decisions": list[dict], "rows": list[dict], "analysis": dict}.
     "overview" is the one-line summary shown in the table (see overview()). "decisions" come from
     lighting_judgement.judge_all, "rows" from building_analysis, "analysis" from migration_analysis.
 
-run_period(start, end, area="pilot", weather="none", minutes=60, log=print) -> list[dict]
+run_period(start, end, area="manhattan", weather="none", minutes=60, log=print) -> list[dict]
     run_night() for every night; a failed night returns {"night", "error"} instead of stopping.
 
 overview(analysis, decisions, weather) -> dict
@@ -97,13 +97,16 @@ def overview(analysis, decisions, weather, source="none"):
     }
 
 
-def run_night(night, area="pilot", weather="none", minutes=60, log=print):
+def run_night(night, area=building_analysis.DEFAULT_AREA, weather="none", minutes=60, log=print):
     log(f"{night}: radar")
     migration_analysis.fetch(night, minutes)
     analysis = migration_analysis.analyze(night)
     if area not in _buildings:
         log(f"{night}: loading {area} buildings")
-        _buildings[area] = building_analysis.load_buildings(building_analysis.AREAS[area])
+        borough = building_analysis.BOROUGH_CODES.get(area)
+        bounds = building_analysis.AREAS["citywide" if borough else area]
+        land_uses = building_analysis.LIGHTING_PROGRAM_LAND_USES if borough or area == "citywide" else None
+        _buildings[area] = building_analysis.load_buildings(bounds, land_uses=land_uses, borough=borough)
     rows = building_analysis.attach_migration(_buildings[area], analysis)
     conditions = None
     if weather != "none":
@@ -116,7 +119,7 @@ def run_night(night, area="pilot", weather="none", minutes=60, log=print):
             "decisions": decisions, "rows": rows, "analysis": analysis}
 
 
-def run_period(start, end, area="pilot", weather="none", minutes=60, log=print):
+def run_period(start, end, area=building_analysis.DEFAULT_AREA, weather="none", minutes=60, log=print):
     results = []
     for night in nights(start, end):
         try:
@@ -156,7 +159,7 @@ def main():
     parser.add_argument("--cli", action="store_true", help="Print results instead of opening the dashboard")
     parser.add_argument("--start", type=date.fromisoformat, default=date(2021, 9, 10))
     parser.add_argument("--end", type=date.fromisoformat, help="Last night, inclusive (default: --start)")
-    parser.add_argument("--area", choices=building_analysis.AREAS, default="midtown")
+    parser.add_argument("--area", choices=building_analysis.REPLAY_AREAS, default=building_analysis.DEFAULT_AREA)
     parser.add_argument("--weather", choices=["none", "dryad", "hrrr"], default="none")
     parser.add_argument("--minutes", type=int, default=60, help="Radar scan interval (30 = finer, slower)")
     parser.add_argument("--port", type=int, default=8765)
